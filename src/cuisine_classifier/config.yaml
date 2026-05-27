@@ -1,0 +1,15 @@
+# Cuisine Type Classifier Configuration
+
+model:
+  name: "gemma2:2b"
+  temperature: 0.0
+
+dataset:
+  path: "data/All_Recipe_Web_Scraping_Dataset_Labeled.csv"
+
+cuisine_types:
+  - Italian
+  - Chinese
+  - Mexican
+  - Indian
+  - American
