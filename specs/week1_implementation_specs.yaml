@@ -1,0 +1,68 @@
+# Week 1 Cuisine Type Classification - Implementation Specs
+
+approach:
+  summary: Build a terminal-driven recipe cuisine classifier that takes only a dish name as input, auto-fetches ingredients and description from the dataset, and returns a structured JSON classification into one of five cuisine types using gemma2:2b.
+  decisions:
+    cuisine_categories:
+      choice: Italian, Chinese, Mexican, Indian, American
+      reasoning: Five well-known, distinct categories that cover a broad range of common recipes and are unambiguous enough for a small model to handle reliably.
+    input_fields:
+      choice: Dish name only (ingredients and description auto-looked up from dataset)
+      reasoning: Following the same pattern as the baseline recipe classifier — user provides only the dish name, and the script fetches ingredients and description from the CSV by exact name match. Falls back to dish name only if not found.
+    llm_role:
+      choice: Classification
+      reasoning: The LLM picks one label from a fixed set — not generating free text or making a recommendation.
+    output_format:
+      choice: JSON with cuisine_type, confidence_score (0-100), reasoning
+      reasoning: Structured output is easier to parse and validate programmatically. The confidence score gives a relative signal of model certainty, and reasoning makes the classification interpretable.
+    input_method:
+      choice: Dish name via terminal input(); ingredients and description fetched from dataset
+      reasoning: Simpler UX — user types one thing. Dataset lookup mirrors the baseline classifier pattern and provides richer context automatically.
+    system_prompt:
+      choice: Explicitly lists the 5 valid cuisine categories and instructs the model to return JSON with the three required fields
+      reasoning: Constraining the model's role and output schema in the system prompt reduces off-label responses and format errors.
+
+tasks:
+  task_1:
+    name: Implement dataset-backed cuisine classifier in main.py
+    details: |
+      - Load All_Recipe_Web_Scraping_Dataset_Labeled.csv at startup, indexed by dish name
+      - Prompt the user for dish name only via input()
+      - Look up ingredients and description from the dataset using dataset.loc[dish_name]
+      - Fall back gracefully if dish not found (classify with dish name only)
+      - Build prompt with available context and call ollama.generate(model="gemma2:2b", prompt=..., system=..., format="json")
+      - Parse the response with json.loads() and print with json.dumps(indent=2)
+
+  task_2:
+    name: Manually evaluate with test cases
+    details: |
+      - Run main.py with at least 3 test cases: one from the dataset (auto-context), one not in dataset (fallback)
+      - Confirm cuisine_type is always one of the 5 defined categories
+      - Confirm JSON parses without error
+      - Confirm reasoning references ingredients or description when context was available
+
+integration_steps:
+  - main.py is a standalone script at the project root — no changes to src/baseline_recipe_classifier/ needed for Week 1
+  - Dataset loaded from data/All_Recipe_Web_Scraping_Dataset_Labeled.csv (same file as baseline classifier)
+  - Run with: uv run python main.py
+
+evaluation_plan:
+  metrics: [label_correctness, json_validity, reasoning_relevance]
+  dataset_size: 3-5 manual test cases
+  baseline: No prior classifier — Week 1 establishes the baseline
+
+reference_materials:
+  notebook: notebooks/week1_introduction_to_llms.ipynb
+
+success_criteria:
+  minimum: main.py runs without errors, accepts a dish name, and returns valid JSON with cuisine_type from the allowed list
+  good: Dataset lookup works for known dishes and reasoning references the auto-fetched ingredients/description; fallback works cleanly for unknown dishes
+
+verification:
+  cli:
+    - Run: uv run python main.py
+    - Enter "Vegetable Quesadillas" (exists in dataset) — confirm context is auto-fetched and cuisine_type=Mexican
+    - Run again with "Butter Chicken" (not in dataset) — confirm fallback message prints and still returns valid JSON with cuisine_type=Indian
+    - Repeat with an Italian dish from the dataset to confirm label variety works
+  streamlit:
+    - Week 1 does not use a Streamlit app — verification is CLI only
