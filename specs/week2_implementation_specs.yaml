@@ -1,0 +1,91 @@
+# Week 2 Embeddings and Evaluation - Implementation Specs
+
+approach:
+  summary: Evaluate embedding quality for cuisine classification using 120 close/far pairs, fine-tune all-mpnet-base-v2 with CoSENTLoss to achieve strong close/far separation, and build a minimal Streamlit app wrapping the existing cuisine classifier.
+  decisions:
+    embedding_pairs:
+      choice: 120 pairs across 6 cuisine categories — 20 per category (10 dataset-exact + 10 general), each split 5 close / 5 far; dish name only for now
+      reasoning: Balanced split ensures fair evaluation across both seen and unseen dish names. Dish name only is the starting point; ingredients and description enrichment is the planned next step.
+    embedding_model:
+      choice: Fine-tuned all-mpnet-base-v2 using CoSENTLoss + SentenceTransformerTrainer
+      reasoning: Off-the-shelf Ollama models (nomic-embed-text, gemma2:2b, GGUF variants) and HuggingFace models (MiniLM, Qwen, GTE) were all tried first — none gave adequate close/far separation. Fine-tuning was the justified next step based on model size and evaluation results.
+    loss_function:
+      choice: CoSENTLoss
+      reasoning: Directly optimises cosine similarity between pairs, which matches the evaluation metric used to measure separation.
+    evaluation_metric:
+      choice: Mean cosine similarity gap between close and far groups
+      reasoning: Simple and interpretable — a gap ≥ 0.2 is the success threshold. Achieved 0.558 post fine-tune vs 0.061 pre fine-tune.
+    streamlit_app:
+      choice: Dish name input → Classify button → cuisine type, confidence score, reasoning; calls predict_cuisine() from src/cuisine_classifier/__main__.py
+      reasoning: Reuses existing classifier logic — no duplication. Week 2 version is intentionally minimal; will grow each subsequent week.
+
+tasks:
+  task_1:
+    name: Build and run embedding evaluation
+    details: |
+      - Create 120 cuisine-dish pairs (6 categories × 20 pairs: 10 dataset-exact + 10 general, 5 close + 5 far each)
+      - Generate embeddings using all-mpnet-base-v2 (pre fine-tune baseline)
+      - Compute mean cosine similarity for close and far groups separately
+      - Record gap = mean(close) - mean(far); target gap ≥ 0.2
+      - Save evaluation results for comparison after fine-tuning
+
+  task_2:
+    name: Fine-tune all-mpnet-base-v2 with CoSENTLoss
+    details: |
+      - Load BASE_MODEL_ID = "all-mpnet-base-v2" via SentenceTransformer
+      - Format pairs as (cuisine_label, dish_name, score) where close=1.0, far=0.0
+      - Train using CoSENTLoss + SentenceTransformerTrainer + SentenceTransformerTrainingArguments
+      - Save fine-tuned model to a local path (e.g. models/cuisine-mpnet-ft/)
+      - Re-run evaluation on the same 120 pairs with the fine-tuned model
+      - Confirm post-FT: close mean ~0.531, far mean ~-0.027, gap ~0.558
+
+  task_3:
+    name: Build Streamlit app v1 (app.py)
+    details: |
+      - Create app.py at project root
+      - Import predict_cuisine() and load_config() and load_dataset() from src/cuisine_classifier/__main__.py
+      - Load config and dataset once at startup (not on every button click)
+      - UI: st.text_input for dish name, st.button("Classify"), st.spinner while running
+      - Display output: cuisine_type, confidence_score, reasoning from the JSON result
+      - Run with: streamlit run app.py
+
+  task_4:
+    name: Update problem_statement.md
+    details: |
+      - Confirm core task still holds: cuisine classification is viable
+      - Add success criteria: embedding gap ≥ 0.2 (achieved 0.558 post fine-tune)
+      - Note future improvement: enrich pairs with ingredients and description
+      - Note: dish name alone is a reasonable signal; richer context improves separability
+
+integration_steps:
+  - Fine-tuned model saved to models/cuisine-mpnet-ft/ and loadable via SentenceTransformer("models/cuisine-mpnet-ft/")
+  - "Note: currently saved on Google Drive (trained on Colab Pro); mpnet runs on CPU for inference — no GPU needed locally"
+  - "Note: fine-tuned mpnet NOT used in Streamlit app for Week 2 — embedding eval was a standalone separability experiment"
+  - "Future: enrich pairs with ingredients + description, re-run eval, then integrate mpnet into Streamlit for embedding-based inference"
+  - app.py imports predict_cuisine() directly from src/cuisine_classifier/__main__.py — uses Ollama/gemma2:2b for classification
+  - Dataset loaded once at app startup using load_dataset() and load_config() from the cuisine_classifier package
+  - Run Streamlit app with: streamlit run app.py
+
+evaluation_plan:
+  metrics: [mean_cosine_similarity_close, mean_cosine_similarity_far, close_far_gap]
+  dataset_size: 120 pairs (6 categories × 20 pairs)
+  baseline: Pre fine-tune gap of 0.061 (close mean 0.299, far mean 0.238)
+
+reference_materials:
+  notebook: notebooks/week2_tokenization_and_embedding.ipynb
+
+success_criteria:
+  minimum: Fine-tuned model achieves close/far gap ≥ 0.2 and Streamlit app runs without errors, accepting a dish name and displaying cuisine type + reasoning
+  good: Gap ≥ 0.5 (achieved 0.558), Streamlit app displays all three fields cleanly, fine-tuned model loads correctly at app startup
+
+verification:
+  cli:
+    - Confirm fine-tuned model is saved at models/cuisine-mpnet-ft/ (or equivalent path)
+    - Run embedding evaluation script on 120 pairs with fine-tuned model — confirm gap ≥ 0.2
+    - Run: uv run python -m cuisine_classifier "Vegetable Quesadillas" — confirm classifier still works
+  streamlit:
+    - Run: streamlit run app.py
+    - Open http://localhost:8501 in browser
+    - Type "Vegetable Quesadillas" in the dish name input and click Classify
+    - Confirm output shows cuisine_type=Mexican, a confidence_score integer, and a non-empty reasoning string
+    - Type "Borscht" and confirm output shows cuisine_type=Other
