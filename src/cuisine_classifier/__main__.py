@@ -73,9 +73,11 @@ Return a JSON object with exactly these fields:
 
 def predict_cuisine(dish_name, config, dataset=None):
     cuisine_types = config["cuisine_types"]
+    allowed = ", ".join(cuisine_types)
     system_prompt = (
-        f"You are a culinary expert who classifies recipes into exactly one of these cuisine types: "
-        f"{', '.join(cuisine_types)}. "
+        f"You are a culinary expert who classifies recipes into exactly one of these cuisine types: {allowed}. "
+        "If the dish does not clearly belong to Italian, Chinese, Mexican, Indian, or American cuisine, you MUST use 'Other'. "
+        "Never invent a cuisine type outside this list. "
         "Always return valid JSON with cuisine_type, confidence_score, and reasoning."
     )
 
@@ -92,9 +94,10 @@ def predict_cuisine(dish_name, config, dataset=None):
         )
         output = json.loads(result.response)
 
-        # Validate cuisine_type is one of the allowed values
+        # If model returns a type outside the allowed list, remap to Other
         if output.get("cuisine_type") not in cuisine_types:
-            print(f"Warning: model returned unexpected cuisine type: {output.get('cuisine_type')}", file=sys.stderr)
+            print(f"Note: model returned '{output.get('cuisine_type')}' — remapped to 'Other'.", file=sys.stderr)
+            output["cuisine_type"] = "Other"
 
         return output
 
