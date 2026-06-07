@@ -76,7 +76,7 @@ def predict_cuisine(dish_name, config, dataset=None):
     allowed = ", ".join(cuisine_types)
     system_prompt = (
         f"You are a culinary expert who classifies recipes into exactly one of these cuisine types: {allowed}. "
-        "If the dish does not clearly belong to Italian, Chinese, Mexican, Indian, or American cuisine, you MUST use 'Other'. "
+        f"If the dish does not clearly belong to any of {allowed}, you MUST use 'Other'. "
         "Never invent a cuisine type outside this list. "
         "Always return valid JSON with cuisine_type, confidence_score, and reasoning."
     )
