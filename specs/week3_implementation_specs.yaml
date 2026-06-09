@@ -1,0 +1,118 @@
+# Week 3 Semantic Retrieval and Few-Shot Prompting - Implementation Specs
+
+approach:
+  summary: Extend the cuisine classifier with a ChromaDB vector store for semantic retrieval, using nomic-embed-text to embed recipes and retrieve k=3 similar examples as few-shot context for the LLM prompt.
+  decisions:
+    embedded_text:
+      choice: ingredients + description combined (dish name excluded)
+      reasoning: Dish name alone gives limited semantic signal; ingredients and description together capture the flavour profile and cooking style that distinguish cuisines. Dish name is stored as metadata for debugging, not embedded.
+    metadata_fields:
+      choice: dish name, id, ingredient count, cuisine type label, embedding model name, embedding timestamp
+      reasoning: Label is needed to build the few-shot prompt. Dish name and id support retrieval debugging. Ingredient count is a lightweight domain signal. Embedding model and timestamp support future auditing and model upgrades.
+    label_leak_exclusions:
+      choice: cuisine type and country of origin excluded from embedded text
+      reasoning: Both fields directly encode the answer being predicted — including them would leak the label into the embedding space.
+    embedding_model:
+      choice: nomic-embed-text via Ollama
+      reasoning: Fine-tuned all-mpnet-base-v2 is saved on Google Drive and planned for later integration. nomic-embed-text is immediately available via Ollama and sufficient for building the retrieval store now.
+    chroma_client:
+      choice: PersistentClient with skip-existing-ids logic, BATCH_SIZE=100
+      reasoning: 13,057 recipes would take significant time to re-embed from scratch each session. PersistentClient stores embeddings on disk; incremental batch embedding lets the student resume without re-processing already-stored documents.
+    collection_name:
+      choice: cuisine_recipes
+      reasoning: Descriptive and scoped to this project — avoids collision with other collections.
+    selection_strategy:
+      choice: similarity-only, k=3
+      reasoning: 6 cuisine classes are semantically well-separated (fine-tuned embedding gap 0.558), so top-3 nearest neighbours are likely from the correct cluster without needing label-aware forcing. k=3 chosen over k=5 due to GPU RAM limitation and quadratic attention cost with gemma2:2b.
+
+tasks:
+  task_1:
+    name: Build retrieval/vector_store.py ChromaDB wrapper
+    details: |
+      - Create retrieval/vector_store.py at project root
+      - Use chromadb.PersistentClient(path="retrieval/chroma_db")
+      - Collection name: "cuisine_recipes"
+      - Implement add(texts, labels, metadata_list):
+          - Check existing ids to skip already-stored documents
+          - Embed texts in batches of 100 using ollama.embed(model="nomic-embed-text", input=texts)
+          - Store with collection.add(ids, embeddings, documents, metadatas)
+          - Metadata per document: dish_name, ingredient_count, cuisine_type, embedding_model, embedding_timestamp
+      - Implement query(text, k=3):
+          - Embed query text using ollama.embed(model="nomic-embed-text", input=[text])
+          - Call collection.query(query_embeddings, n_results=k)
+          - Return list of dicts with: document, cuisine_type, dish_name, distance
+
+  task_2:
+    name: Populate ChromaDB from recipe dataset
+    details: |
+      - Load All_Recipe_Web_Scraping_Dataset_Labeled.csv
+      - For each recipe, build embedded text = ingredients + description (pipe-separated ingredients → comma-separated)
+      - Build metadata dict: dish_name=Name, ingredient_count=len(ingredients.split("|")), cuisine_type="" (to be filled when labels available), embedding_model="nomic-embed-text", embedding_timestamp=current ISO timestamp
+      - Call vector_store.add() in batches — skip existing ids automatically
+      - Confirm collection.count() after population
+
+  task_3:
+    name: Update predict_cuisine() to support retrieval few-shot mode
+    details: |
+      - Add optional parameter: use_retrieval=False, vector_store=None to predict_cuisine()
+      - When use_retrieval=True and vector_store is not None:
+          - Build query text from dish name + ingredients + description (same format as stored documents)
+          - Call vector_store.query(query_text, k=3)
+          - Format retrieved examples into few-shot block:
+              Example 1: [dish_name] → [cuisine_type]
+              Example 2: [dish_name] → [cuisine_type]
+              Example 3: [dish_name] → [cuisine_type]
+          - Prepend few-shot block to the user prompt
+      - When use_retrieval=False: existing zero-shot behaviour unchanged
+
+  task_4:
+    name: Update Streamlit app with retrieval toggle
+    details: |
+      - Add st.checkbox("Use retrieval-augmented few-shot", value=False) to app.py
+      - Load vector_store once at startup using st.cache_resource
+      - Pass use_retrieval and vector_store to predict_cuisine() based on checkbox state
+      - Display retrieved examples in an st.expander("Retrieved examples") when retrieval is on
+
+  task_5:
+    name: Design evaluate.py for cuisine classifier (execution deferred)
+    details: |
+      - Mirror pattern from src/baseline_recipe_classifier/evaluate.py
+      - Two runs on same test sample: zero-shot vs retrieval few-shot (k=3)
+      - Metrics: overall accuracy, per-class F1 score
+      - Sample size: 20–50 recipes with ground truth cuisine labels
+      - Per-class breakdown required — retrieval may help on ambiguous classes (Other) while neutral on obvious ones
+      - Other class: inspect manually in addition to F1 (catch-all category)
+      - Note: ground truth labels in progress — evaluation execution deferred to next week
+
+integration_steps:
+  - New file: retrieval/vector_store.py — ChromaDB wrapper (add + query)
+  - New directory: retrieval/chroma_db/ — persistent ChromaDB storage (add to .gitignore)
+  - src/cuisine_classifier/__main__.py: add use_retrieval and vector_store params to predict_cuisine()
+  - app.py: load vector_store at startup, add retrieval toggle checkbox, show retrieved examples in expander
+  - Pipeline flow: embed query → retrieve k=3 from ChromaDB → build few-shot prompt → call LLM → return label
+
+evaluation_plan:
+  metrics: [accuracy, f1_per_class, manual_inspection_other]
+  dataset_size: 20-50 recipes with ground truth cuisine labels
+  baseline: zero-shot predict_cuisine() with no few-shot examples (current behaviour)
+
+reference_materials:
+  notebook: notebooks/week3_transformer_architecture.ipynb
+
+success_criteria:
+  minimum: vector_store.py runs without errors, ChromaDB is populated with at least 200 recipes, query() returns k=3 results with cuisine_type and dish_name, Streamlit retrieval toggle works and shows retrieved examples
+  good: retrieval few-shot improves accuracy over zero-shot baseline on 20+ test recipes; per-class F1 shows improvement on at least one cuisine type; retrieved examples are semantically relevant to the query
+
+verification:
+  cli:
+    - Run population script to embed recipes into ChromaDB — confirm collection.count() > 0
+    - Run a test query: uv run python -c "from retrieval.vector_store import VectorStore; vs = VectorStore(); print(vs.query('zucchini cheese tortilla bell pepper', k=3))"
+    - Confirm 3 results returned with cuisine_type and dish_name in each result
+    - Run: uv run python -m cuisine_classifier "Vegetable Quesadillas" — confirm zero-shot mode still works
+  streamlit:
+    - Run: streamlit run app.py
+    - Open http://localhost:8501
+    - Type "Vegetable Quesadillas", leave retrieval toggle OFF — confirm zero-shot result shows as before
+    - Enable "Use retrieval-augmented few-shot" checkbox, click Classify
+    - Confirm retrieved examples appear in expander and cuisine_type result is returned
+    - Type "Borscht", enable retrieval — confirm cuisine_type=Other and retrieved examples are shown
