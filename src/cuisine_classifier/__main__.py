@@ -51,7 +51,7 @@ def lookup_context(dish_name, dataset):
         return None, None
 
 
-def build_prompt(dish_name, ingredients=None, description=None):
+def build_prompt(dish_name, ingredients=None, description=None, few_shot_examples=None):
     context_lines = []
     if ingredients:
         context_lines.append(f"Ingredients: {ingredients}")
@@ -59,8 +59,15 @@ def build_prompt(dish_name, ingredients=None, description=None):
         context_lines.append(f"Description: {description}")
     context_str = "\n".join(context_lines) + "\n" if context_lines else ""
 
+    few_shot_str = ""
+    if few_shot_examples:
+        lines = ["Here are some similar recipes for reference:"]
+        for i, ex in enumerate(few_shot_examples, 1):
+            lines.append(f"  Example {i}: {ex['dish_name']} → {ex['cuisine_type']}")
+        few_shot_str = "\n".join(lines) + "\n\n"
+
     # TODO: try changing this prompt to see how the output changes
-    return f"""Classify the following recipe into its cuisine type.
+    return f"""{few_shot_str}Classify the following recipe into its cuisine type.
 
 Dish name: {dish_name}
 {context_str}
@@ -71,7 +78,7 @@ Return a JSON object with exactly these fields:
 """
 
 
-def predict_cuisine(dish_name, config, dataset=None):
+def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector_store=None):
     cuisine_types = config["cuisine_types"]
     allowed = ", ".join(cuisine_types)
     system_prompt = (
@@ -82,7 +89,15 @@ def predict_cuisine(dish_name, config, dataset=None):
     )
 
     ingredients, description = lookup_context(dish_name, dataset)
-    prompt = build_prompt(dish_name, ingredients, description)
+
+    few_shot_examples = None
+    if use_retrieval and vector_store is not None:
+        query_text = " ".join(filter(None, [ingredients, description]))
+        if not query_text:
+            query_text = dish_name
+        few_shot_examples = vector_store.query(query_text, k=3)
+
+    prompt = build_prompt(dish_name, ingredients, description, few_shot_examples)
 
     try:
         result = ollama.generate(
