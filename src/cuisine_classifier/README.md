@@ -34,6 +34,10 @@ streamlit run app.py
 
 Open [http://localhost:8501](http://localhost:8501), enter a dish name, and click **Classify** to see the cuisine type, confidence score, and reasoning.
 
+Two optional checkboxes are available:
+- **Look it up in the recipe dataset** — fetches ingredients and description for richer context
+- **Use retrieval-augmented few-shot** — retrieves 3 similar recipes from ChromaDB and uses them as few-shot examples in the prompt. Requires the vector store to be populated first (see below).
+
 ## Output
 
 Returns a JSON object with three fields:
@@ -49,11 +53,47 @@ Returns a JSON object with three fields:
 ## How It Works
 
 1. Loads the recipe dataset indexed by dish name
-2. Looks up ingredients and description for the given dish
-3. Builds a prompt with available context and sends it to `gemma2:2b`
-4. Returns structured JSON with cuisine type, confidence score, and reasoning
-5. Falls back to dish name only if the dish is not found in the dataset
-6. Remaps any out-of-scope cuisine labels to `Other`
+2. If **Look it up in the recipe dataset** is enabled, fetches ingredients and description for the dish
+3. If **Use retrieval-augmented few-shot** is enabled, embeds the query and fetches 3 similar recipes from ChromaDB as few-shot examples
+4. Builds a prompt with available context and few-shot examples, then sends it to `gemma2:2b`
+5. Returns structured JSON with cuisine type, confidence score, and reasoning
+6. Falls back to dish name only if the dish is not found in the dataset
+7. Remaps any out-of-scope cuisine labels to `Other`
+
+## Semantic Retrieval (Week 3)
+
+The classifier supports retrieval-augmented few-shot prompting using ChromaDB and `nomic-embed-text`.
+
+### Populate the vector store
+
+Run this once to embed the first 200 recipes. Re-run each time you want to add the next 200:
+
+```bash
+uv run python retrieval/populate.py
+```
+
+Each run embeds 200 new recipes and skips ones already stored. Check current count anytime:
+
+```bash
+uv run python -c "import sys; sys.path.insert(0, '.'); from retrieval.vector_store import VectorStore; vs = VectorStore(); print('Count:', vs.count())"
+```
+
+### How retrieval works
+
+- Each recipe is stored as `ingredients + description` text, embedded with `nomic-embed-text`
+- At query time, the dish's ingredients + description is embedded and the 3 nearest recipes are retrieved
+- Those 3 recipes are prepended to the prompt as few-shot examples
+- The query dish itself is excluded from retrieved results to avoid self-referencing
+
+### Metadata stored per recipe
+
+| Field | Source |
+|---|---|
+| `dish_name` | `Name` column |
+| `ingredient_count` | derived from `Ingredients` (count of `\|` separators) |
+| `cuisine_type` | empty until ground truth labels are available |
+| `embedding_model` | `nomic-embed-text` |
+| `embedding_timestamp` | ISO timestamp at embed time |
 
 ## Project Structure
 
@@ -63,6 +103,11 @@ src/cuisine_classifier/
 ├── __main__.py       # Classifier logic and CLI entry point
 ├── config.yaml       # Model settings and cuisine types
 └── README.md
+
+retrieval/
+├── vector_store.py   # ChromaDB wrapper (add + query)
+├── populate.py       # Script to embed recipes into ChromaDB (200 at a time)
+└── chroma_db/        # Persistent vector store (auto-created on first run)
 
 app.py                # Streamlit UI (project root)
 ```
