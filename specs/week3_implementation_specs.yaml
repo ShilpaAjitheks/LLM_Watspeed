@@ -43,13 +43,18 @@ tasks:
           - Return list of dicts with: document, cuisine_type, dish_name, distance
 
   task_2:
-    name: Populate ChromaDB from recipe dataset
+    name: Create retrieval/populate.py script
     details: |
+      - Create retrieval/populate.py as a standalone script (not embedded in app or classifier)
       - Load All_Recipe_Web_Scraping_Dataset_Labeled.csv
-      - For each recipe, build embedded text = ingredients + description (pipe-separated ingredients → comma-separated)
-      - Build metadata dict: dish_name=Name, ingredient_count=len(ingredients.split("|")), cuisine_type="" (to be filled when labels available), embedding_model="nomic-embed-text", embedding_timestamp=current ISO timestamp
-      - Call vector_store.add() in batches — skip existing ids automatically
-      - Confirm collection.count() after population
+      - Drop rows missing Description or Ingredients (would embed meaningless "nan" text)
+      - Embed and store 200 recipes per run — skips already-stored ids automatically
+      - Re-run populate.py each time to add the next 200 recipes
+      - Embedded text = ingredients (pipe → comma) + description
+      - Metadata per recipe: dish_name (Name column), ingredient_count (derived from Ingredients split by |),
+        cuisine_type="" (empty until ground truth labels available), embedding_model and embedding_timestamp added automatically by vector_store.add()
+      - Prints how many recipes remain after each run
+      - Run with: uv run python retrieval/populate.py
 
   task_3:
     name: Update predict_cuisine() to support retrieval few-shot mode
@@ -86,10 +91,11 @@ tasks:
 
 integration_steps:
   - New file: retrieval/vector_store.py — ChromaDB wrapper (add + query)
+  - New file: retrieval/populate.py — standalone script to embed 200 recipes per run into ChromaDB
   - New directory: retrieval/chroma_db/ — persistent ChromaDB storage (add to .gitignore)
-  - src/cuisine_classifier/__main__.py: add use_retrieval and vector_store params to predict_cuisine()
-  - app.py: load vector_store at startup, add retrieval toggle checkbox, show retrieved examples in expander
-  - Pipeline flow: embed query → retrieve k=3 from ChromaDB → build few-shot prompt → call LLM → return label
+  - src/cuisine_classifier/__main__.py: add use_retrieval and vector_store params to predict_cuisine(); fetch k+1 results and filter out query dish to avoid self-referencing
+  - app.py: load vector_store at startup, add dataset lookup checkbox, add retrieval toggle checkbox, show retrieved examples in expander
+  - Pipeline flow: embed query → retrieve k=3 from ChromaDB (excluding query dish) → build few-shot prompt → call LLM → return label
 
 evaluation_plan:
   metrics: [accuracy, f1_per_class, manual_inspection_other]

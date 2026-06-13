@@ -95,7 +95,8 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         query_text = " ".join(filter(None, [ingredients, description]))
         if not query_text:
             query_text = dish_name
-        few_shot_examples = vector_store.query(query_text, k=3)
+        candidates = vector_store.query(query_text, k=4)
+        few_shot_examples = [ex for ex in candidates if ex["dish_name"] != dish_name][:3]
 
     prompt = build_prompt(dish_name, ingredients, description, few_shot_examples)
 
