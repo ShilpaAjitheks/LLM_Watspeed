@@ -62,25 +62,37 @@ Returns a JSON object with three fields:
 
 ## Semantic Retrieval (Week 3)
 
-The classifier supports retrieval-augmented few-shot prompting using ChromaDB and `nomic-embed-text`.
+The classifier supports retrieval-augmented few-shot prompting using ChromaDB. Two embedding models are supported, each with its own separate ChromaDB store:
+
+| Model | Backend | ChromaDB path |
+|---|---|---|
+| `nomic-embed-text` | Ollama | `retrieval/chroma_db/` |
+| `mpnet` | fine-tuned all-mpnet-base-v2 (local CPU) | `retrieval/chroma_db_mpnet/` |
+
+The model is selected via a radio button in the Streamlit UI when retrieval is enabled.
 
 ### Populate the vector store
 
-Run this once to embed the first 200 recipes. Re-run each time you want to add the next 200:
+Run this to embed the next 200 recipes. Re-run each time you want to add more:
 
 ```bash
+# nomic-embed-text (default)
 uv run python retrieval/populate.py
+
+# fine-tuned mpnet
+uv run python retrieval/populate.py --model mpnet
 ```
 
-Each run embeds 200 new recipes and skips ones already stored. Check current count anytime:
+Each run skips recipes already stored. Check current count:
 
 ```bash
-uv run python -c "import sys; sys.path.insert(0, '.'); from retrieval.vector_store import VectorStore; vs = VectorStore(); print('Count:', vs.count())"
+uv run python -c "import sys; sys.path.insert(0, '.'); from retrieval.vector_store import VectorStore; vs = VectorStore(); print('nomic count:', vs.count())"
+uv run python -c "import sys; sys.path.insert(0, '.'); from retrieval.vector_store import VectorStore; vs = VectorStore(model='mpnet'); print('mpnet count:', vs.count())"
 ```
 
 ### How retrieval works
 
-- Each recipe is stored as `ingredients + description` text, embedded with `nomic-embed-text`
+- Each recipe is stored as `ingredients + description` text, embedded with the selected model
 - At query time, the dish's ingredients + description is embedded and the 3 nearest recipes are retrieved
 - Those 3 recipes are prepended to the prompt as few-shot examples
 - The query dish itself is excluded from retrieved results to avoid self-referencing
@@ -91,8 +103,8 @@ uv run python -c "import sys; sys.path.insert(0, '.'); from retrieval.vector_sto
 |---|---|
 | `dish_name` | `Name` column |
 | `ingredient_count` | derived from `Ingredients` (count of `\|` separators) |
-| `cuisine_type` | empty until ground truth labels are available |
-| `embedding_model` | `nomic-embed-text` |
+| `cuisine_type` | empty until ground truth labels are generated via SOTA model |
+| `embedding_model` | `nomic-embed-text` or `mpnet` |
 | `embedding_timestamp` | ISO timestamp at embed time |
 
 ## Project Structure
