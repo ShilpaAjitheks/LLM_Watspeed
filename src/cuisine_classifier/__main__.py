@@ -88,7 +88,13 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         "Always return valid JSON with cuisine_type, confidence_score, and reasoning."
     )
 
+    print(f"[1/4] Dataset lookup: fetching context for '{dish_name}'...")
     ingredients, description = lookup_context(dish_name, dataset)
+    context_found = bool(ingredients or description)
+    if context_found:
+        print(f"[1/4] Dataset lookup: context retrieved successfully.")
+    else:
+        print(f"[1/4] Dataset lookup: no context found — proceeding with dish name only.")
 
     few_shot_examples = None
     if use_retrieval and vector_store is not None:
@@ -97,9 +103,13 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
             query_text = dish_name
         candidates = vector_store.query(query_text, k=4)
         few_shot_examples = [ex for ex in candidates if ex["dish_name"] != dish_name][:3]
+        print(f"[2/4] ChromaDB retrieval: {len(few_shot_examples)} few-shot examples retrieved ({vector_store.model}).")
+    else:
+        print(f"[2/4] ChromaDB retrieval: skipped — zero-shot mode.")
 
     prompt = build_prompt(dish_name, ingredients, description, few_shot_examples)
 
+    print(f"[3/4] Sending prompt to {config['model']['name']}...")
     try:
         result = ollama.generate(
             model=config["model"]["name"],
@@ -110,16 +120,16 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         )
         output = json.loads(result.response)
 
-        # If model returns a type outside the allowed list, remap to Other
         if output.get("cuisine_type") not in cuisine_types:
             print(f"Note: model returned '{output.get('cuisine_type')}' — remapped to 'Other'.", file=sys.stderr)
             output["cuisine_type"] = "Other"
 
-        return output
+        print(f"[4/4] Response received — classification complete.")
+        return output, prompt, system_prompt, context_found
 
     except Exception as e:
         print(f"Error calling Ollama: {e}", file=sys.stderr)
-        return None
+        return None, prompt, system_prompt, context_found
 
 
 def main():
@@ -159,7 +169,7 @@ def main():
     print(f"Mode: {mode}")
     print()
 
-    output = predict_cuisine(args.dish_name, config, dataset=dataset)
+    output, _, __, ___ = predict_cuisine(args.dish_name, config, dataset=dataset)
 
     if output:
         print(json.dumps(output, indent=2))
