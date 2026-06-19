@@ -40,25 +40,38 @@ Two optional checkboxes are available:
 
 ## Output
 
-Returns a JSON object with three fields:
+Returns a structured response with four fields (enforced via Pydantic `CuisineResponse`):
 
 ```json
 {
-  "cuisine_type": "Mexican",
+  "recipe_name": "Vegetable Quesadillas",
+  "thoughts": [
+    "Quesadillas are a staple Mexican dish",
+    "Tortillas and cheese filling confirm Mexican origin"
+  ],
   "confidence_score": 95,
-  "reasoning": "Quesadillas are a staple in Mexican cuisine..."
+  "cuisine": "Mexican"
 }
 ```
+
+- `thoughts` — chain-of-thought reasoning steps the model worked through before classifying
+- `confidence_score` — 0–100; note: small models can be correct but uncertain (score near 0) on boundary cases
+- `cuisine` — one of the six fixed labels; remapped to `Other` if the model returns anything outside the list
 
 ## How It Works
 
 1. Loads the recipe dataset indexed by dish name
-2. If **Look it up in the recipe dataset** is enabled, fetches ingredients and description for the dish
-3. If **Use retrieval-augmented few-shot** is enabled, embeds the query and fetches 3 similar recipes from ChromaDB as few-shot examples
-4. Builds a prompt with available context and few-shot examples, then sends it to `gemma2:2b`
-5. Returns structured JSON with cuisine type, confidence score, and reasoning
-6. Falls back to dish name only if the dish is not found in the dataset
-7. Remaps any out-of-scope cuisine labels to `Other`
+2. Looks up ingredients and description for the dish (falls back to dish name only if not found)
+3. Builds a prompt using `build_prompt()`:
+   - Always prepends **16 static boundary few-shot examples** (`_STATIC_FEW_SHOT`) covering known confusion cases (e.g. "Italian Wedding Cookies → American", "Yaki Mandu → Other")
+   - If ChromaDB retrieval is enabled, appends 3 dynamically retrieved similar recipes (queried by ingredients + description, or dish name as fallback)
+4. Sends the prompt via `ollama.chat()` with a structured system prompt containing:
+   - Culinary expert persona
+   - Chain-of-thought instruction ("Think step by step in 2-3 short lines")
+   - Origin-priority rule (classify by culinary origin, not ingredient adaptations)
+   - Other-category guidance (explicit list of cuisines that belong in Other)
+5. Parses the response into a `CuisineResponse` Pydantic model — enforces schema at the model level
+6. Remaps any out-of-scope cuisine labels to `Other`
 
 ## Semantic Retrieval (Week 3)
 
@@ -107,12 +120,55 @@ uv run python -c "import sys; sys.path.insert(0, '.'); from retrieval.vector_sto
 | `embedding_model` | `nomic-embed-text` or `mpnet` |
 | `embedding_timestamp` | ISO timestamp at embed time |
 
+## Evaluation
+
+Run the ablation study against the 30-dish golden eval set (`data/prompt_eval_cuisine.csv`):
+
+```bash
+# Two-leg ablation: baseline (dish name only) vs. context-enhanced (dataset lookup)
+uv run python -m cuisine_classifier.evaluate --verbose
+
+# Three-leg ablation: add retrieval-augmented as third leg
+uv run python -m cuisine_classifier.evaluate --verbose --retrieval --embed-model all-mpnet-base-v2
+```
+
+The script runs each dish one by one and prints a live counter (`[No Context] 1/30 — dish name`). At the end it shows per-leg accuracy, failures, per-category breakdown, and improvement comparison.
+
+| Leg | Mode | Flag |
+|---|---|---|
+| 1 | Baseline — dish name only | always runs |
+| 2 | Context-enhanced — dataset lookup | always runs |
+| 3 | Retrieval-augmented — context + ChromaDB | `--retrieval --embed-model <model>` |
+
+**Week 4 benchmark:** context-enhanced accuracy = 83.3% (25/30) on the 30-dish eval set.
+
+### Changing or expanding the eval set
+
+Edit `data/prompt_eval_cuisine.csv` directly — add or remove rows as needed. The format is two columns:
+
+```csv
+Name,expected
+Your Dish Name,Italian
+Another Dish,Chinese
+```
+
+To use a different file entirely:
+
+```bash
+uv run python -m cuisine_classifier.evaluate --eval-set data/my_custom_eval.csv --verbose
+```
+
+Any number of dishes is supported. Each dish runs 2 model calls (one per leg), so time scales linearly — 30 dishes ≈ 5–10 min, 60 dishes ≈ 10–20 min. The live counter keeps you informed throughout.
+
+> **Week 5 tip:** consider expanding to 50–60 dishes before running the LoRA fine-tuning comparison — more coverage gives a more reliable accuracy gap between prompt-only and adapter-based results.
+
 ## Project Structure
 
 ```
 src/cuisine_classifier/
 ├── __init__.py       # Package declaration
 ├── __main__.py       # Classifier logic and CLI entry point
+├── evaluate.py       # Evaluation script — ablation study on golden eval set
 ├── config.yaml       # Model settings and cuisine types
 └── README.md
 

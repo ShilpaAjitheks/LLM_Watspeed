@@ -1,0 +1,179 @@
+# Week 4 Prompt Tuning and Evaluation - Implementation Specs
+
+approach:
+  summary: >
+    Improve the cuisine classifier's system prompt with targeted fixes for two observed
+    failure modes — "Other" category confusion and American-adaptation vs. Italian-origin
+    misclassification — and re-evaluate accuracy on the 30-dish golden eval set.
+  decisions:
+    output_schema:
+      choice: >
+        Pydantic CuisineResponse model with recipe_name (str), thoughts (list[str]),
+        confidence_score (int 0-100), cuisine (Literal of 6 categories).
+        Pass format=CuisineResponse.model_json_schema() to ollama.generate().
+      reasoning: >
+        Structured output enforces the schema at the model level rather than relying
+        on prompt instructions alone. The thoughts field captures chain-of-thought
+        reasoning in a structured way, pairing with the step-by-step instruction.
+
+    chain_of_thought:
+      choice: >
+        Add to system prompt: "Think step by step in 2-3 short lines:
+        explicit cuisine claim? dish format owned by one cuisine?
+        what does the ingredient pantry suggest?"
+      reasoning: >
+        Forces the model to reason through three angles before committing to a label,
+        reducing confident mis-classifications on boundary cases.
+
+    other_category_guidance:
+      choice: >
+        Add explicit list of cuisines that belong in Other (Japanese, Korean, French,
+        Vietnamese, South American, Middle Eastern, African, etc.) and instruct the
+        model NOT to confuse other European cuisines (French, German, Greek, etc.)
+        with Italian.
+      reasoning: >
+        3 of 5 failures were "Other" dishes pulled into the nearest main category
+        (Vietnamese/Japanese → Chinese, French → Italian). Vague "Other" definition
+        caused the model to default to the closest known category.
+
+    origin_priority_rule:
+      choice: >
+        Add explicit rule: classify by culinary origin, not by ingredient adaptations.
+        If a dish has Italian roots (biscotti, pasta shapes), classify as Italian even
+        if Americanized toppings or fillings are present.
+      reasoning: >
+        2 of 5 failures were Italian-origin dishes (Pasta Primavera, White Chocolate
+        Macadamia Biscotti) misclassified as American because the model detected
+        American-style ingredients. Origin wins over adaptation.
+
+    few_shot_strategy:
+      choice: >
+        Two-layer few-shot: (1) static boundary anchor examples hard-coded in the
+        prompt covering known confusion cases; (2) optional dynamic ChromaDB retrieval
+        (cosine similarity on ingredients + description) toggled via UI.
+      reasoning: >
+        Static examples guard against known failure modes regardless of ChromaDB
+        availability. Dynamic retrieval adds dish-specific context when enabled.
+
+tasks:
+  task_1:
+    name: Add CuisineResponse Pydantic model
+    details: |
+      In src/cuisine_classifier/__main__.py (or a new models.py):
+
+      from pydantic import BaseModel
+      from typing import Literal
+
+      class CuisineResponse(BaseModel):
+          recipe_name: str
+          thoughts: list[str]
+          confidence_score: int
+          cuisine: Literal["American", "Italian", "Indian", "Mexican", "Chinese", "Other"]
+
+      Update the ollama.generate() call:
+        format=CuisineResponse.model_json_schema()
+
+      Parse the response with:
+        parsed = CuisineResponse.model_validate_json(result.response)
+
+  task_2:
+    name: Strengthen system prompt with two targeted fixes
+    details: |
+      Update the system_prompt string in predict_cuisine() to include all of:
+
+      1. Culinary expert persona (already present — keep it)
+
+      2. Chain-of-thought instruction:
+         "Think step by step in 2-3 short lines: explicit cuisine claim?
+          dish format owned by one cuisine? what does the ingredient pantry suggest?"
+
+      3. Other category guidance:
+         "The Other category covers ALL cuisines outside the five main ones:
+          Japanese, Korean, Vietnamese, Thai, French, German, Greek, Middle Eastern,
+          South American (Brazilian, Peruvian, Colombian), African, Caribbean, etc.
+          Do NOT classify French, German, Greek, or other European dishes as Italian.
+          Do NOT classify Japanese, Korean, or Vietnamese dishes as Chinese."
+
+      4. Origin-priority rule:
+         "Classify by culinary ORIGIN, not by ingredient adaptations.
+          If a dish has Italian roots (e.g. biscotti, pasta shapes, risotto),
+          classify as Italian even if Americanized toppings or fillings are present.
+          If a dish has Mexican roots (e.g. tacos, quesadillas), classify as Mexican
+          even if the protein or toppings differ from traditional versions."
+
+  task_3:
+    name: Save eval set to data/ and run evaluation
+    details: |
+      Save the 30-dish eval file to: data/prompt_eval_cuisine.csv
+      Columns: Name, expected
+
+      Write or run an evaluation script that:
+      1. Loads data/prompt_eval_cuisine.csv
+      2. For each dish, calls predict_cuisine() with the updated prompt
+      3. Compares cuisine output to expected label (case-insensitive)
+      4. Prints per-dish results and overall accuracy
+
+      Baseline to beat: 83.3% (25/30 correct)
+
+      Also run evaluation twice:
+      - Zero-shot mode (use_retrieval=False)
+      - Few-shot mode (use_retrieval=True, with ChromaDB)
+      Compare accuracy between the two modes.
+
+  task_4:
+    name: Add static boundary few-shot examples to build_prompt()
+    details: |
+      In build_prompt(), add static anchor examples that cover known boundary cases:
+
+      examples = (
+          "Mom's Chicken and Dumplings    -> American  (biscuit-dough dumplings, not Chinese)\n"
+          "The Ultimate Pasta Salad       -> American  (pasta in name, US picnic dish)\n"
+          "Italian Wedding Cookies        -> American  ('Italian' name, US butter-almond cookie)\n"
+          "Baked Garlic Parmesan Chicken  -> American  (Parmesan present, US weeknight bake)\n"
+          "Chef John's Meatless Meatballs -> Italian   (substitute protein inherits the dish)\n"
+          "Tofu Tacos                     -> Mexican   (substitute protein inherits the dish)\n"
+          "Baked BBQ Pulled Pork Nachos   -> Mexican   (nacho base is Mexican even with BBQ)\n"
+          "Navajo Tacos                   -> American  (fry-bread taco is US, NOT Mexican)\n"
+          "Authentic Saag Paneer          -> Indian    (paneer + spinach + fenugreek)\n"
+          "Authentic Chicken Tikka Masala -> Indian    (yogurt marinade + garam masala)\n"
+          "Char Siu (Chinese BBQ Pork)    -> Chinese   ('BBQ' name, but hoisin/five-spice)\n"
+          "Chicken Lettuce Wraps          -> Chinese   (hoisin/soy stir-fried filling)\n"
+          "Yaki Mandu (Korean Dumplings)  -> Other     (Korean — outside the five)\n"
+      )
+
+      These should always appear in the prompt. ChromaDB examples (when enabled)
+      are appended after these static examples — do NOT replace them.
+
+integration_steps:
+  - "Update predict_cuisine() in src/cuisine_classifier/__main__.py: replace format='json' with format=CuisineResponse.model_json_schema() and parse response with CuisineResponse.model_validate_json()"
+  - "Update system_prompt string in predict_cuisine() with the three additions: chain-of-thought, Other guidance, origin-priority rule"
+  - "Update build_prompt() to always include static boundary few-shot examples, with ChromaDB examples appended after (not replacing) them"
+  - "Save data/prompt_eval_cuisine.csv from the eval set shared in the interview"
+  - "Run evaluation script comparing zero-shot vs. few-shot accuracy"
+
+evaluation_plan:
+  metrics: [accuracy, per-category accuracy, failure case analysis]
+  dataset_size: 30
+  baseline: "83.3% (25/30 correct) — zero-shot with original system prompt"
+
+reference_materials:
+  notebook: notebooks/week4_prompt_tuning_and_evaluation.ipynb
+
+success_criteria:
+  minimum: "Accuracy improves above 83.3% (>25/30 correct) with updated prompt"
+  good: "All 5 previously-failing dishes now classified correctly (100% on known failures)"
+  stretch: "Few-shot mode (ChromaDB enabled) outperforms zero-shot mode on the eval set"
+
+verification:
+  cli:
+    - "Save eval file: copy the 30-dish CSV to data/prompt_eval_cuisine.csv"
+    - "Run: uv run python -m cuisine_classifier 'Sunomono (Japanese Cucumber Salad)' — should return Other, not Chinese"
+    - "Run: uv run python -m cuisine_classifier 'French Onion Soup Gratinee' — should return Other, not Italian"
+    - "Run: uv run python -m cuisine_classifier 'Healthy Pasta Primavera' — should return Italian, not American"
+    - "Run eval script on full 30-dish set and confirm accuracy > 83.3%"
+  streamlit:
+    - "Open http://localhost:8501 (run: uv run streamlit run app.py if not already running)"
+    - "Enter 'Sunomono (Japanese Cucumber Salad)' — verify cuisine shows 'Other' with thoughts explaining it is Japanese"
+    - "Enter 'Marietta's White Chocolate Macadamia Biscotti' — verify cuisine shows 'Italian' with origin reasoning in thoughts"
+    - "Toggle ChromaDB retrieval on/off and confirm few-shot examples appear/disappear in the output"
+    - "Verify the response now shows the thoughts field as a list of reasoning steps"
