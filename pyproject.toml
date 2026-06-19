@@ -17,6 +17,7 @@ dependencies = [
     "ipywidgets>=8.1.8",
     "notebook>=7.5.5",
     "ollama>=0.6.1",
+    "openpyxl>=3.1.5",
     "pandas>=3.0.1",
     "peft>=0.19.1",
     "pillow>=12.1.1",
