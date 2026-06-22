@@ -14,6 +14,15 @@ import yaml
 import ollama
 import pandas as pd
 from pathlib import Path
+from typing import Literal
+from pydantic import BaseModel
+
+
+class CuisineResponse(BaseModel):
+    recipe_name: str
+    thoughts: list[str]
+    confidence_score: int
+    cuisine: Literal["American", "Italian", "Indian", "Mexican", "Chinese", "Other"]
 
 
 def load_config(config_path=None):
@@ -51,6 +60,28 @@ def lookup_context(dish_name, dataset):
         return None, None
 
 
+_STATIC_FEW_SHOT = (
+    "Use these examples to calibrate where the cuisine boundaries fall.\n"
+    "Judge by core ingredients and origin, not the dish's English name:\n\n"
+    "Mom's Chicken and Dumplings    -> American  (biscuit-dough dumplings, not Chinese)\n"
+    "The Ultimate Pasta Salad       -> American  (pasta in name, US picnic dish)\n"
+    "Italian Wedding Cookies        -> American  ('Italian' name, US butter-almond cookie)\n"
+    "Baked Garlic Parmesan Chicken  -> American  (breadcrumb-Parmesan bake is US weeknight cooking — no tomato sauce or mozzarella, NOT Italian Parmigiana)\n"
+    "Chef John's Meatless Meatballs -> Italian   (substitute protein inherits the dish)\n"
+    "Tofu Tacos                     -> Mexican   (substitute protein inherits the dish)\n"
+    "Baked BBQ Pulled Pork Nachos   -> Mexican   (nacho base is Mexican even with BBQ)\n"
+    "Navajo Tacos                   -> American  (fry-bread taco is US, NOT Mexican)\n"
+    "Authentic Saag Paneer          -> Indian    (paneer + spinach + fenugreek)\n"
+    "Authentic Chicken Tikka Masala -> Indian    (yogurt marinade + garam masala)\n"
+    "Char Siu (Chinese BBQ Pork)    -> Chinese   ('BBQ' name, but hoisin/five-spice)\n"
+    "Chicken Lettuce Wraps          -> Chinese   (hoisin/soy stir-fried filling)\n"
+    "Yaki Mandu (Korean Dumplings)  -> Other     (Korean — outside the five)\n"
+    "Sunomono (Japanese Salad)      -> Other     (Japanese — outside the five)\n"
+    "Pho Bo (Vietnamese Beef Soup)  -> Other     (Vietnamese — outside the five)\n"
+    "French Onion Soup              -> Other     (French — outside the five)\n"
+)
+
+
 def build_prompt(dish_name, ingredients=None, description=None, few_shot_examples=None):
     context_lines = []
     if ingredients:
@@ -59,33 +90,44 @@ def build_prompt(dish_name, ingredients=None, description=None, few_shot_example
         context_lines.append(f"Description: {description}")
     context_str = "\n".join(context_lines) + "\n" if context_lines else ""
 
-    few_shot_str = ""
+    dynamic_str = ""
     if few_shot_examples:
-        lines = ["Here are some similar recipes for reference:"]
+        lines = ["\nAdditional similar recipes retrieved for this dish:"]
         for i, ex in enumerate(few_shot_examples, 1):
             lines.append(f"  Example {i}: {ex['dish_name']} → {ex['cuisine_type']}")
-        few_shot_str = "\n".join(lines) + "\n\n"
+        dynamic_str = "\n".join(lines) + "\n"
 
-    # TODO: try changing this prompt to see how the output changes
-    return f"""{few_shot_str}Classify the following recipe into its cuisine type.
+    return f"""{_STATIC_FEW_SHOT}{dynamic_str}
+Now classify the following recipe.
 
 Dish name: {dish_name}
-{context_str}
-Return a JSON object with exactly these fields:
-- cuisine_type: the cuisine type
-- confidence_score: integer from 0 to 100
-- reasoning: brief explanation of why this cuisine type fits
-"""
+{context_str}"""
 
 
 def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector_store=None):
     cuisine_types = config["cuisine_types"]
-    allowed = ", ".join(cuisine_types)
     system_prompt = (
-        f"You are a culinary expert who classifies recipes into exactly one of these cuisine types: {allowed}. "
-        f"If the dish does not clearly belong to any of {allowed}, you MUST use 'Other'. "
-        "Never invent a cuisine type outside this list. "
-        "Always return valid JSON with cuisine_type, confidence_score, and reasoning."
+        "You are a culinary expert classifying a dish into exactly ONE cuisine.\n"
+        "Categories: American, Italian, Indian, Mexican, Chinese, Other.\n\n"
+        "Think step by step in 2-3 short lines: explicit cuisine claim? "
+        "dish format owned by one cuisine? what does the ingredient pantry suggest?\n\n"
+        "CLASSIFICATION GUIDE:\n"
+        "Italian — pasta/pizza/risotto with Italian sauces, cheeses or meats; Italian-American classics "
+        "(chicken parmigiana, baked ziti, stuffed shells, biscotti); pasta in Italian sauce even with "
+        "non-Italian proteins. Exception: if pasta is just the vehicle for a non-Italian flavor profile "
+        "(Cajun shrimp pasta, fajita pasta) → classify by that flavor profile, not Italian.\n"
+        "Mexican — key markers: tomatillo, cotija, chipotle, jalapeño, corn/flour tortilla, mole, pozole, "
+        "salsa, avocado as primary ingredient. Tacos/quesadillas/enchiladas → Mexican even with non-traditional proteins.\n"
+        "American — US regional cuisines (Southern, Cajun/Creole, New England, Tex-Mex); generic comfort food "
+        "with no ethnic markers (stews, casseroles, baked goods using standard US pantry: condensed soup, "
+        "cream cheese, butter, all-purpose flour).\n\n"
+        "OTHER RULE: The Other category covers ALL cuisines outside the five main ones: "
+        "Japanese, Korean, Vietnamese, Thai, French, German, Greek, Spanish, "
+        "Middle Eastern, South American (Brazilian, Peruvian, Colombian), African, Caribbean, etc. "
+        "Do NOT classify French, German, Greek, or other European dishes as Italian. "
+        "Do NOT classify Japanese, Korean, or Vietnamese dishes as Chinese. "
+        "Use Other ONLY for a cuisine clearly outside the five — never pick Other just because "
+        "you are unsure between two of the five; pick the most probable of the five instead."
     )
 
     print(f"[1/4] Dataset lookup: fetching context for '{dish_name}'...")
@@ -111,25 +153,28 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
 
     print(f"[3/4] Sending prompt to {config['model']['name']}...")
     try:
-        result = ollama.generate(
+        result = ollama.chat(
             model=config["model"]["name"],
-            prompt=prompt,
-            system=system_prompt,
-            format="json",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            format=CuisineResponse.model_json_schema(),
             options={"temperature": config["model"]["temperature"]},
         )
-        output = json.loads(result.response)
+        parsed = CuisineResponse.model_validate_json(result.message.content)
+        output = parsed.model_dump()
 
-        if output.get("cuisine_type") not in cuisine_types:
-            print(f"Note: model returned '{output.get('cuisine_type')}' — remapped to 'Other'.", file=sys.stderr)
-            output["cuisine_type"] = "Other"
+        if output["cuisine"] not in cuisine_types:
+            print(f"Note: model returned '{output['cuisine']}' — remapped to 'Other'.", file=sys.stderr)
+            output["cuisine"] = "Other"
 
         print(f"[4/4] Response received — classification complete.")
-        return output, prompt, system_prompt, context_found
+        return output, prompt, system_prompt, context_found, few_shot_examples
 
     except Exception as e:
         print(f"Error calling Ollama: {e}", file=sys.stderr)
-        return None, prompt, system_prompt, context_found
+        return None, prompt, system_prompt, context_found, few_shot_examples
 
 
 def main():
@@ -169,7 +214,7 @@ def main():
     print(f"Mode: {mode}")
     print()
 
-    output, _, __, ___ = predict_cuisine(args.dish_name, config, dataset=dataset)
+    output, _, __, ___, ____ = predict_cuisine(args.dish_name, config, dataset=dataset)
 
     if output:
         print(json.dumps(output, indent=2))
