@@ -59,7 +59,7 @@ else:
 if st.button("Classify", disabled=not dish_name.strip()):
     with st.spinner("Classifying..."):
         try:
-            result, prompt, system_prompt, context_found = predict_cuisine(
+            result, prompt, system_prompt, context_found, few_shot_examples = predict_cuisine(
                 dish_name.strip(),
                 config,
                 dataset=dataset if use_dataset else None,
@@ -68,7 +68,7 @@ if st.button("Classify", disabled=not dish_name.strip()):
             )
         except Exception as e:
             st.error(f"Unexpected error during classification: {e}")
-            result, prompt, system_prompt, context_found = None, None, None, False
+            result, prompt, system_prompt, context_found, few_shot_examples = None, None, None, False, None
 
     if result:
         # Mode summary
@@ -82,15 +82,14 @@ if st.button("Classify", disabled=not dish_name.strip()):
         mode_label = " + ".join(mode_parts) if mode_parts else "zero-shot (dish name only)"
         st.info(f"Mode: {mode_label}")
 
-        st.subheader(f"Cuisine: {result['cuisine_type']}")
+        st.subheader(f"Cuisine: {result['cuisine']}")
         st.progress(result["confidence_score"] / 100, text=f"Confidence: {result['confidence_score']}%")
-        st.write(result["reasoning"])
+        for thought in result.get("thoughts", []):
+            st.write(f"- {thought}")
 
-        if use_retrieval and vector_store:
-            examples = vector_store.query(dish_name.strip(), k=4)
-            examples = [ex for ex in examples if ex["dish_name"] != dish_name.strip()][:3]
+        if use_retrieval and few_shot_examples:
             with st.expander("Retrieved few-shot examples"):
-                for ex in examples:
+                for ex in few_shot_examples:
                     st.markdown(f"**{ex['dish_name']}** → `{ex['cuisine_type']}` (distance: {ex['distance']})")
 
         with st.expander("Prompt sent to LLM"):
