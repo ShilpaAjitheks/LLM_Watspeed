@@ -19,10 +19,10 @@ from pydantic import BaseModel
 
 
 class CuisineResponse(BaseModel):
-    recipe_name: str
-    thoughts: list[str]
-    confidence_score: int
-    cuisine: Literal["American", "Italian", "Indian", "Mexican", "Chinese", "Other"]
+    Recipe_name: str
+    Reasoning : list[str]
+    Confidence_score: int
+    Cuisine: Literal["American", "Italian", "Indian", "Mexican", "Chinese", "Other"]
 
 
 def load_config(config_path=None):
@@ -202,12 +202,13 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         "IMPERATIVE DISH FORMAT OVERRIDES — ingredients never override these:\n"
         "  Chinese formats: fried rice / egg rolls / wontons / lo mein / stir-fry in Chinese style / dumplings\n"
         "    → Chinese REGARDLESS of protein or modifier.\n"
-        "    (Turkey Fried Rice → Chinese; Keto Beef Egg Roll Slaw → Chinese; Local Kine Wontons → Chinese)\n"
+        "    Exception: a Hawaiian/local fusion marker ('Local Kine') overrides the format rule → Other.\n"
+        "    (Keto Beef Egg Roll Slaw → Chinese; Local Kine Wontons → Other)\n"
         "  Italian formats: garlic bread / bruschetta / calzone / biscotti / tiramisu / lasagna / pizza dough /\n"
         "    risotto / carbonara / bolognese / pesto pasta\n"
         "    → Italian REGARDLESS of modifier or dietary swap.\n"
         "    (Gluten-Free Biscotti → Italian; Twinkie Tiramisu → Italian; Whole Wheat Pizza Dough → Italian;\n"
-        "     Grandma's Sour Cream Lasagna → Italian; Meatball-Stuffed Garlic Bread → Italian)\n\n"
+        "      Meatball-Stuffed Garlic Bread → Italian)\n\n"
         "EXCEPTION TO DEFAULT RULE — do NOT classify as American when the dish name carries an explicit\n"
         "foreign nationality marker: Russian, Swedish, Danish, Polish, Korean, Vietnamese, Japanese, Thai, Filipino, "
         "Greek, French, German, Middle Eastern, Cuban, Brazilian, Peruvian, Caribbean, Jamaican, African, Irish, British, etc.\n"
@@ -272,9 +273,9 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         parsed = CuisineResponse.model_validate_json(result.message.content)
         output = parsed.model_dump()
 
-        if output["cuisine"] not in cuisine_types:
-            print(f"Note: model returned '{output['cuisine']}' — remapped to 'Other'.", file=sys.stderr)
-            output["cuisine"] = "Other"
+        if output["Cuisine"] not in cuisine_types:
+            print(f"Note: model returned '{output['Cuisine']}' — remapped to 'Other'.", file=sys.stderr)
+            output["Cuisine"] = "Other"
 
         print(f"[4/4] Response received — classification complete.")
         return output, prompt, system_prompt, context_found, few_shot_examples
