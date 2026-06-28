@@ -86,7 +86,8 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate cuisine classifier with ablation study")
     parser.add_argument("--config", type=str, default=None, help="Path to config file")
     parser.add_argument("--eval-set", type=str, default=None, help="Path to eval CSV (Name, expected columns)")
-    parser.add_argument("--verbose", action="store_true", help="Show detailed per-dish predictions")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed per-dish predictions (all results)")
+    parser.add_argument("--skip-baseline", action="store_true", help="Skip baseline leg and run context-enhanced only")
     parser.add_argument("--retrieval", action="store_true", help="Run retrieval-augmented mode as third ablation leg")
     parser.add_argument("--embed-model", type=str, default=None, help="Embedding model for retrieval (required with --retrieval)")
     args = parser.parse_args()
@@ -128,11 +129,13 @@ def main():
     print(f"Using model: {config['model']['name']}")
 
     # Leg 1 — baseline: dish name only (no dataset context, no retrieval)
-    print("\n[1/3] Baseline — dish name only (no context, no retrieval)")
-    print(f"{'─'*65}")
-    base_accuracy, base_correct, base_total, base_predictions = evaluate_classifier(
-        test_dishes, config, leg_label="No Context", dataset=None, use_retrieval=False,
-    )
+    base_accuracy = base_correct = base_total = base_predictions = None
+    if not args.skip_baseline:
+        print("\n[1/3] Baseline — dish name only (no context, no retrieval)")
+        print(f"{'─'*65}")
+        base_accuracy, base_correct, base_total, base_predictions = evaluate_classifier(
+            test_dishes, config, leg_label="No Context", dataset=None, use_retrieval=False,
+        )
 
     # Leg 2 — context-enhanced: dataset lookup for ingredients + description
     print(f"\n[2/3] Context-Enhanced — dataset lookup (ingredients + description)")
@@ -167,7 +170,8 @@ def main():
             sys.exit(1)
 
     # Print results
-    print_results("Baseline (dish name only)", base_accuracy, base_correct, base_total, base_predictions, args.verbose)
+    if base_predictions is not None:
+        print_results("Baseline (dish name only)", base_accuracy, base_correct, base_total, base_predictions, args.verbose)
     print_results("Context-Enhanced (dataset lookup)", ctx_accuracy, ctx_correct, ctx_total, ctx_predictions, args.verbose)
 
     if rag_predictions is not None:
@@ -177,22 +181,23 @@ def main():
     print(f"\n{'='*65}")
     print(f"COMPARISON")
     print(f"{'='*65}")
-    print(f"Baseline (dish name only):        {base_accuracy:.1f}%")
+    if base_predictions is not None:
+        print(f"Baseline (dish name only):        {base_accuracy:.1f}%")
     print(f"Context-Enhanced (dataset lookup): {ctx_accuracy:.1f}%")
-    ctx_improvement = ctx_accuracy - base_accuracy
-    print(f"Context improvement:              {ctx_improvement:+.1f} percentage points")
+    if base_predictions is not None:
+        ctx_improvement = ctx_accuracy - base_accuracy
+        print(f"Context improvement:              {ctx_improvement:+.1f} percentage points")
+        if ctx_improvement > 0:
+            print(f"\n✓ Dataset context improved accuracy!")
+        elif ctx_improvement < 0:
+            print(f"\n✗ Dataset context decreased accuracy")
+        else:
+            print(f"\n− No change from adding context")
 
     if rag_predictions is not None:
         rag_improvement = rag_accuracy - ctx_accuracy
         print(f"Retrieval-Augmented:              {rag_accuracy:.1f}%")
         print(f"Retrieval improvement over ctx:   {rag_improvement:+.1f} percentage points")
-
-    if ctx_improvement > 0:
-        print(f"\n✓ Dataset context improved accuracy!")
-    elif ctx_improvement < 0:
-        print(f"\n✗ Dataset context decreased accuracy")
-    else:
-        print(f"\n− No change from adding context")
 
     # Per-category breakdown
     print(f"\nPer-category breakdown (context-enhanced):")
