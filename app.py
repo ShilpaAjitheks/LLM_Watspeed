@@ -82,9 +82,9 @@ if st.button("Classify", disabled=not dish_name.strip()):
         mode_label = " + ".join(mode_parts) if mode_parts else "zero-shot (dish name only)"
         st.info(f"Mode: {mode_label}")
 
-        st.subheader(f"Cuisine: {result['cuisine']}")
-        st.progress(result["confidence_score"] / 100, text=f"Confidence: {result['confidence_score']}%")
-        for thought in result.get("thoughts", []):
+        st.subheader(f"Cuisine: {result['Cuisine']}")
+        st.progress(result["Confidence_score"] / 100, text=f"Confidence: {result['Confidence_score']}%")
+        for thought in result.get("Reasoning", []):
             st.write(f"- {thought}")
 
         if use_retrieval and few_shot_examples:

@@ -128,6 +128,9 @@ Run the ablation study against the 30-dish golden eval set (`data/prompt_eval_cu
 # Two-leg ablation: baseline (dish name only) vs. context-enhanced (dataset lookup)
 uv run python -m cuisine_classifier.evaluate --verbose
 
+# Skip baseline leg — run context-enhanced only (faster)
+uv run python -m cuisine_classifier.evaluate --verbose --skip-baseline
+
 # Three-leg ablation: add retrieval-augmented as third leg
 uv run python -m cuisine_classifier.evaluate --verbose --retrieval --embed-model all-mpnet-base-v2
 ```
@@ -152,32 +155,79 @@ Your Dish Name,Italian
 Another Dish,Chinese
 ```
 
+The eval script also accepts `.xlsx` files and recognises `expert_label` as an alias for the `expected` column, so spreadsheets exported from a labelling tool work without renaming columns.
+
 To use a different file entirely:
 
 ```bash
 uv run python -m cuisine_classifier.evaluate --eval-set data/my_custom_eval.csv --verbose
+uv run python -m cuisine_classifier.evaluate --eval-set data/validation_sample.xlsx --verbose
 ```
 
 Any number of dishes is supported. Each dish runs 2 model calls (one per leg), so time scales linearly — 30 dishes ≈ 5–10 min, 60 dishes ≈ 10–20 min. The live counter keeps you informed throughout.
 
 > **Week 5 tip:** consider expanding to 50–60 dishes before running the LoRA fine-tuning comparison — more coverage gives a more reliable accuracy gap between prompt-only and adapter-based results.
 
+## Embedding Fine-Tuning (Week 3)
+
+`embedder.py` fine-tunes `all-mpnet-base-v2` on cuisine domain pairs so the embedding space better separates dishes by cuisine. The fine-tuned model is then available as the `mpnet` option in the retrieval pipeline.
+
+> **Hardware:** designed to run in Google Colab with a GPU. CPU execution works but is significantly slower.
+
+### Domain pairs
+
+`domain_pairs.py` provides 120 labeled training pairs — 20 per cuisine (6 cuisines), split evenly between `close` (dish belongs to that cuisine) and `far` (dish is from a different cuisine). 60 pairs are backed by real AllRecipes dataset entries; 60 use general dish terms.
+
+### Running the fine-tuner
+
+```bash
+uv run python src/cuisine_classifier/embedder.py
+```
+
+This will:
+1. Load all 120 domain pairs from `domain_pairs.py`
+2. Measure the baseline cosine similarity gap between close/far pairs using the base `all-mpnet-base-v2` model
+3. Fine-tune for 5 epochs with CoSENTLoss (train/eval split 85/15)
+4. Compare fine-tuned gap vs baseline gap and print per-pair deltas
+5. Save the fine-tuned model to `models/ft-domain-embedding/cuisine_mpnet_ft`
+6. Save evaluation results to `data/embedding_eval.csv`
+
+A gap ≥ 0.2 indicates good cuisine signal; < 0.1 suggests the base model or pairs need revision.
+
+### Using the fine-tuned model
+
+Once saved, the model can be used in the retrieval pipeline and evaluation:
+
+```bash
+# Populate ChromaDB with the fine-tuned model
+uv run python retrieval/populate.py --model mpnet
+
+# Run evaluation with retrieval using the fine-tuned model
+uv run python -m cuisine_classifier.evaluate --verbose --retrieval --embed-model all-mpnet-base-v2
+```
+
 ## Project Structure
 
 ```
 src/cuisine_classifier/
-├── __init__.py       # Package declaration
-├── __main__.py       # Classifier logic and CLI entry point
-├── evaluate.py       # Evaluation script — ablation study on golden eval set
-├── config.yaml       # Model settings and cuisine types
+├── __init__.py         # Package declaration
+├── __main__.py         # Classifier logic and CLI entry point
+├── evaluate.py         # Evaluation script — ablation study on golden eval set
+├── embedder.py         # Fine-tuning script for all-mpnet-base-v2 on domain pairs
+├── domain_pairs.py     # 120 labeled close/far pairs for embedding fine-tuning
+├── config.yaml         # Model settings and cuisine types
 └── README.md
 
 retrieval/
-├── vector_store.py   # ChromaDB wrapper (add + query)
-├── populate.py       # Script to embed recipes into ChromaDB (200 at a time)
-└── chroma_db/        # Persistent vector store (auto-created on first run)
+├── vector_store.py     # ChromaDB wrapper (add + query)
+├── populate.py         # Script to embed recipes into ChromaDB (200 at a time)
+└── chroma_db/          # Persistent vector store (auto-created on first run)
 
-app.py                # Streamlit UI (project root)
+models/
+└── ft-domain-embedding/
+    └── cuisine_mpnet_ft/   # Fine-tuned all-mpnet-base-v2 (output of embedder.py)
+
+app.py                  # Streamlit UI (project root)
 ```
 
 ## Configuration

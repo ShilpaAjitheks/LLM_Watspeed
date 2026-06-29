@@ -37,7 +37,7 @@ def evaluate_classifier(test_dishes, config, leg_label="", dataset=None, use_ret
             use_retrieval=use_retrieval,
             vector_store=vector_store,
         )
-        predicted = output["cuisine"] if output else "ERROR"
+        predicted = output["Cuisine"] if output else "ERROR"
         is_correct = predicted.lower() == expected.lower()
         if is_correct:
             correct += 1
