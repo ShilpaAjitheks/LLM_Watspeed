@@ -1,0 +1,178 @@
+# Week 5 Fine-tuning with Adapters - Implementation Specs
+
+approach:
+  summary: >
+    Train a LoRA adapter on a 200-example dataset of cuisine classification examples
+    to fix name-keyword bias — cases where dish-name format words (e.g. "taco") override
+    ingredient/technique signals — then export as GGUF for local Ollama inference and add
+    a Streamlit toggle to compare base model vs. adapter outputs side by side.
+  decisions:
+    fine_tuning_goal:
+      choice: Option B — accuracy gap on a specific failure slice
+      reasoning: >
+        The prompt already works for most cases but consistently misfires when dish-name
+        format words (taco, lasagna, baklava-style spices) override ingredient signals.
+        More prompt rules make the contradiction worse; an adapter can learn the general
+        principle that marker ingredients beat name-keywords when they conflict.
+
+    training_format:
+      choice: Exact match to inference format — system prompt + few-shot user prompt + CuisineResponse JSON
+      reasoning: >
+        Training and inference formats must be identical or the adapter behaves differently
+        in production than in training. The output schema is CuisineResponse with
+        Recipe_name (str), Reasoning (list[str]), Confidence_score (int),
+        Cuisine (Literal["American","Italian","Indian","Mexican","Chinese","Other"]).
+
+    label_source:
+      choice: Claude Sonnet for cuisine labels; Ollama Gemma4 for reasoning, manually validated
+      reasoning: >
+        Sonnet is a reliable teacher model for this task. Gemma4-generated reasoning was
+        reviewed end-to-end; vague or contradictory reasoning was replaced with
+        Sonnet-generated reasoning before training to avoid teaching incoherent chains.
+
+    dataset_coverage:
+      choice: ~200 examples, 6 balanced classes (33-35 each), 9/16 hard keyword-bias misfires, cross-cuisine
+      reasoning: >
+        Balanced classes prevent the adapter from over-fitting one cuisine. Including 9 true
+        keyword-bias misfires across multiple class boundaries teaches the general principle,
+        not just the American/Mexican boundary. Edge cases (fry bread, rack of lamb → American,
+        teriyaki tacos) are included alongside easy examples to maintain general accuracy.
+
+    training_hardware:
+      choice: Unsloth SFT on Google Colab GPU; Ollama on local CPU for inference
+      reasoning: >
+        No local GPU available. Colab provides free GPU for training. Adapter is exported as
+        GGUF at the end of the training run so it can be loaded by Ollama locally on CPU,
+        matching the existing cuisine_classifier inference path exactly.
+
+    integration_approach:
+      choice: GGUF export → Ollama → st.radio toggle in Streamlit (model name only changes)
+      reasoning: >
+        The existing cuisine_classifier already calls Ollama. Switching to the adapter only
+        requires passing a different model name. The prompt format is identical for both,
+        so no other code changes are needed. st.radio makes both options visible and
+        labeled, which is clearer than a toggle for a side-by-side comparison.
+
+tasks:
+  task_1:
+    name: Fix known regressions and expand training data
+    details: |
+      Before retraining, fix the two confirmed regressions in finetune_cuisine_option_b_fixed.jsonl:
+      1. Add counter-example for Baklava → Other (Middle Eastern dessert, not Indian).
+         Ingredients: phyllo dough, walnuts/pistachios, honey, rose water, butter.
+         The adapter learned "Baklava-like spices → Indian" — add 2-3 Other examples
+         with similar spice profiles but non-Indian origins.
+      2. Add counter-example for American-style Lasagna → American (not Italian).
+         Dishes like "Grandma's Best Ever Sour Cream Lasagna" use sour cream, cream cheese,
+         or condensed soup — US home-cooking markers that override the Italian format word.
+         Add 2-3 such examples labeled American.
+      3. Fix parsing failures (empty option_b predictions): check if these are format errors
+         (model not producing valid CuisineResponse JSON) and add the failing examples to
+         training data with correct outputs.
+      Copy finetune_cuisine_option_b_fixed.jsonl from Google Drive to data/ before retraining.
+
+  task_2:
+    name: Retrain adapter on Colab and export as GGUF
+    details: |
+      In the Colab notebook (week5_cuisine_finetuning.ipynb):
+      1. Load updated finetune_cuisine_option_b_fixed.jsonl.
+      2. Load base model: unsloth/gemma-2-2b-it-bnb-4bit
+      3. Attach LoRA: r=16, alpha=32, target_modules as per notebook defaults.
+      4. Run SFTTrainer on the dataset.
+      5. At end of training, export as GGUF:
+           model.save_pretrained_gguf("cuisine_adapter_option_b", tokenizer, quantization_method="q4_k_m")
+      6. Download the exported GGUF file and place it in models/cuisine_adapter_option_b/.
+      7. Register with Ollama:
+           ollama create cuisine-adapter-option-b -f models/cuisine_adapter_option_b/Modelfile
+      The Modelfile should point to the GGUF file and set the system prompt if needed.
+
+  task_3:
+    name: Add st.radio model toggle to Streamlit app
+    details: |
+      In the Streamlit app (app.py or equivalent):
+      1. Add a st.radio widget above the classify button:
+           model_choice = st.radio(
+               "Model",
+               ["Base model", "Adapter (Option B)"],
+               horizontal=True
+           )
+      2. Map selection to Ollama model name:
+           model_name = config["model"]["name"] if model_choice == "Base model" else "cuisine-adapter-option-b"
+      3. Pass model_name to the classifier call instead of the hardcoded config value.
+      4. Display outputs from both models side by side on the same input, especially
+         on hard keyword-bias cases (Navajo Tacos, teriyaki tacos, rack of lamb).
+      No other code changes are needed — prompt format is identical for both models.
+
+  task_4:
+    name: Re-run evaluation benchmark and compare before/after
+    details: |
+      Run the evaluation script against prompt_eval_cuisine_fin.csv for both models:
+        uv run python -m cuisine_classifier.evaluate --model gemma3:4b --num-samples all
+        uv run python -m cuisine_classifier.evaluate --model cuisine-adapter-option-b --num-samples all
+      Record:
+        - Overall accuracy for each model
+        - Accuracy on keyword-bias misfire cases specifically
+        - Any new regressions introduced by the retrained adapter
+      Success threshold: adapter accuracy >= 74% (current result) with no new regressions
+      on the Baklava and American-style lasagna cases.
+
+integration_steps:
+  - Copy finetune_cuisine_option_b_fixed.jsonl from Google Drive to data/
+  - Retrain on Colab and export GGUF (see task_2 for exact steps)
+  - Place exported GGUF in models/cuisine_adapter_option_b/
+  - Create Ollama Modelfile and register model with: ollama create cuisine-adapter-option-b -f models/cuisine_adapter_option_b/Modelfile
+  - Add st.radio toggle to Streamlit app (task_3) — only model name passed to Ollama changes
+  - Re-run evaluation benchmark with both models (task_4)
+
+evaluation_plan:
+  metrics: [overall_accuracy, accuracy_on_keyword_bias_slice]
+  dataset_size: prompt_eval_cuisine_fin.csv (edge-case-heavy eval set)
+  baseline: Base model 64% overall accuracy; Option B adapter 74% (+10%) from first training run
+
+reference_materials:
+  notebook: notebooks/week5_cuisine_finetuning.ipynb
+  adapter_notebook: notebooks/week5_fine_tuning_with_adapters.ipynb
+  training_data: data/finetune_cuisine_option_b_fixed.jsonl
+  eval_benchmark: data/prompt_eval_cuisine_fin.csv
+
+success_criteria:
+  minimum: >
+    Adapter registered in Ollama, st.radio toggle working in Streamlit, adapter accuracy
+    >= 74% on prompt_eval_cuisine_fin.csv, and no regression on Baklava (→ Other) or
+    American-style lasagna (→ American) cases.
+  good: >
+    Adapter accuracy > 74% with regression cases fixed, keyword-bias misfire rate lower
+    than base model on the hard slice, and side-by-side Streamlit comparison showing
+    visible improvement on at least 2 known hard cases.
+
+verification:
+  cli:
+    - "Copy finetune_cuisine_option_b_fixed.jsonl to data/ and confirm: ls data/finetune_cuisine_option_b_fixed.jsonl"
+    - "Confirm adapter is registered in Ollama: ollama list | grep cuisine-adapter"
+    - "Run evaluation for both models and confirm adapter >= 74%: uv run python -m cuisine_classifier.evaluate"
+    - "Test adapter directly on a known hard case: uv run python -m cuisine_classifier 'Navajo Tacos' and confirm American"
+    - "Test regression cases: uv run python -m cuisine_classifier 'Easy Baklava' (expect Other) and 'Grandma Best Ever Sour Cream Lasagna' (expect American)"
+  streamlit:
+    - "Start the app: uv run streamlit run app.py"
+    - "Before adapter is registered in Ollama: app should show base model results only or a clear message that the adapter is not yet available — not a crash"
+    - "After adapter is registered: confirm st.radio shows 'Base model' and 'Adapter (Option B)' options"
+    - "Enter 'Navajo Tacos' and switch between models — base model should predict Mexican, adapter should predict American"
+    - "Enter 'Easy Baklava' — adapter should predict Other, not Indian"
+    - "Confirm Cuisine label, Reasoning, and Confidence_score all display correctly for both models"
+
+known_pitfalls:
+  - >
+    Raw model.generate() does not enforce JSON format — unlike Ollama which guarantees valid
+    JSON output. If you run adapter inference outside Ollama (e.g. directly in Colab for testing),
+    the model may generate preamble text, trailing text, or truncated JSON.
+    Fix: extract the JSON object from the raw output using
+    re.search(r'\{.*\}', output, re.DOTALL) before calling json.loads().
+  - >
+    Parsing failures (empty predictions in eval) are likely format errors, not accuracy failures.
+    Check that the adapter output matches the exact CuisineResponse schema field names
+    (Recipe_name, Reasoning, Confidence_score, Cuisine) — a field name mismatch will cause
+    model_validate_json() to fail silently or return None.
+  - >
+    GGUF quantization (q4_k_m) introduces slight accuracy variance vs. the full-precision adapter.
+    If accuracy drops unexpectedly after export, try q8_0 quantization for higher fidelity
+    at the cost of larger file size.
