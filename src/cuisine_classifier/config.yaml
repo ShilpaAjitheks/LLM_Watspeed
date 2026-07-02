@@ -4,6 +4,9 @@ model:
   name: "gemma2:2b"
   temperature: 0.0
 
+adapter:
+  name: "cuisine-classifier:latest"
+
 dataset:
   path: "data/All_Recipe_Web_Scraping_Dataset_Labeled.csv"
 

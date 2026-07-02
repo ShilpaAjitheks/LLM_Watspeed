@@ -34,7 +34,11 @@ streamlit run app.py
 
 Open [http://localhost:8501](http://localhost:8501), enter a dish name, and click **Classify** to see the cuisine type, confidence score, and reasoning.
 
-Two optional checkboxes are available:
+Controls available:
+- **Model** radio — three options:
+  - **Base model** (`gemma2:2b`) — prompt-only classifier
+  - **Adapter (Option B)** (`cuisine-classifier:latest`) — Week 5 LoRA adapter; shows a warning if not registered in Ollama
+  - **Compare both** — runs both models on the same input and shows results side by side in two columns
 - **Look it up in the recipe dataset** — fetches ingredients and description for richer context
 - **Use retrieval-augmented few-shot** — retrieves 3 similar recipes from ChromaDB and uses them as few-shot examples in the prompt. Requires the vector store to be populated first (see below).
 
@@ -44,33 +48,33 @@ Returns a structured response with four fields (enforced via Pydantic `CuisineRe
 
 ```json
 {
-  "recipe_name": "Vegetable Quesadillas",
-  "thoughts": [
+  "Recipe_name": "Vegetable Quesadillas",
+  "Reasoning": [
     "Quesadillas are a staple Mexican dish",
     "Tortillas and cheese filling confirm Mexican origin"
   ],
-  "confidence_score": 95,
-  "cuisine": "Mexican"
+  "Confidence_score": 95,
+  "Cuisine": "Mexican"
 }
 ```
 
-- `thoughts` — chain-of-thought reasoning steps the model worked through before classifying
-- `confidence_score` — 0–100; note: small models can be correct but uncertain (score near 0) on boundary cases
-- `cuisine` — one of the six fixed labels; remapped to `Other` if the model returns anything outside the list
+- `Reasoning` — chain-of-thought reasoning steps the model worked through before classifying
+- `Confidence_score` — 0–100; note: small models can be correct but uncertain (score near 0) on boundary cases
+- `Cuisine` — one of the six fixed labels; remapped to `Other` if the model returns anything outside the list
 
 ## How It Works
 
 1. Loads the recipe dataset indexed by dish name
 2. Looks up ingredients and description for the dish (falls back to dish name only if not found)
 3. Builds a prompt using `build_prompt()`:
-   - Always prepends **16 static boundary few-shot examples** (`_STATIC_FEW_SHOT`) covering known confusion cases (e.g. "Italian Wedding Cookies → American", "Yaki Mandu → Other")
+   - Always prepends **20 static boundary few-shot examples** (`_STATIC_FEW_SHOT`) covering known confusion cases (e.g. "Italian Wedding Cookies → American", "Bourbon Chicken → Chinese", "Twinkie® Tiramisu → Italian")
    - If ChromaDB retrieval is enabled, appends 3 dynamically retrieved similar recipes (queried by ingredients + description, or dish name as fallback)
-4. Sends the prompt via `ollama.chat()` with a structured system prompt containing:
-   - Culinary expert persona
-   - Chain-of-thought instruction ("Think step by step in 2-3 short lines")
-   - Origin-priority rule (classify by culinary origin, not ingredient adaptations)
-   - Other-category guidance (explicit list of cuisines that belong in Other)
-5. Parses the response into a `CuisineResponse` Pydantic model — enforces schema at the model level
+4. Sends the prompt to Ollama — two paths depending on the model:
+   - **Base model** (`gemma2:2b`): `ollama.chat()` with separate system/user roles + JSON schema enforcement via `format=CuisineResponse.model_json_schema()`
+   - **Adapter** (`cuisine-classifier:latest`): `ollama.generate()` with the Gemma2 chat template applied manually (`<bos><start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n`) and free-form JSON parsing — matches the exact inference format used during Colab training
+5. Parses the response:
+   - Base model: `CuisineResponse.model_validate_json()` (strict Pydantic)
+   - Adapter: `_parse_free_form()` — regex-based extraction with `_AMERICAN_ALIASES` remapping
 6. Remaps any out-of-scope cuisine labels to `Other`
 
 ## Semantic Retrieval (Week 3)
@@ -86,7 +90,9 @@ The model is selected via a radio button in the Streamlit UI when retrieval is e
 
 ### Populate the vector store
 
-Run this to embed the next 200 recipes. Re-run each time you want to add more:
+Run this to embed the next 200 recipes. Re-run each time you want to add more. Already-stored recipes are skipped, so it's safe to re-run:
+
+> **To embed the full dataset in one pass:** set `BATCH_LIMIT = 6781` in `retrieval/populate.py` before running — the dataset has ~6,781 usable recipes in total.
 
 ```bash
 # nomic-embed-text (default)
@@ -122,7 +128,7 @@ uv run python -c "import sys; sys.path.insert(0, '.'); from retrieval.vector_sto
 
 ## Evaluation
 
-Run the ablation study against the 30-dish golden eval set (`data/prompt_eval_cuisine.csv`):
+Run the ablation study against an eval set:
 
 ```bash
 # Two-leg ablation: baseline (dish name only) vs. context-enhanced (dataset lookup)
@@ -133,40 +139,79 @@ uv run python -m cuisine_classifier.evaluate --verbose --skip-baseline
 
 # Three-leg ablation: add retrieval-augmented as third leg
 uv run python -m cuisine_classifier.evaluate --verbose --retrieval --embed-model all-mpnet-base-v2
+
+# Use the Week 5 edge-case eval set
+uv run python -m cuisine_classifier.evaluate --eval-set data/prompt_eval_cuisine_fin.csv --skip-baseline --verbose
+
+# Compare base model vs adapter on the same eval set
+uv run python -m cuisine_classifier.evaluate --eval-set data/prompt_eval_cuisine_fin.csv --skip-baseline --verbose
+uv run python -m cuisine_classifier.evaluate --eval-set data/prompt_eval_cuisine_fin.csv --model cuisine-classifier:latest --skip-baseline --verbose
 ```
 
-The script runs each dish one by one and prints a live counter (`[No Context] 1/30 — dish name`). At the end it shows per-leg accuracy, failures, per-category breakdown, and improvement comparison.
+The script runs each dish one by one and prints a live counter. At the end it shows per-leg accuracy, failures, per-category breakdown, and improvement comparison.
 
-| Leg | Mode | Flag |
-|---|---|---|
-| 1 | Baseline — dish name only | always runs |
-| 2 | Context-enhanced — dataset lookup | always runs |
-| 3 | Retrieval-augmented — context + ChromaDB | `--retrieval --embed-model <model>` |
+| Flag | Purpose |
+|---|---|
+| `--eval-set` | Path to eval CSV or XLSX (`Name`, `expected` columns) |
+| `--model` | Ollama model name to use (overrides config default `gemma2:2b`) |
+| `--skip-baseline` | Skip the dish-name-only leg, run context-enhanced only |
+| `--verbose` | Show every prediction, not just failures |
+| `--retrieval --embed-model <model>` | Add retrieval-augmented as a third leg |
 
-**Week 4 benchmark:** context-enhanced accuracy = 83.3% (25/30) on the 30-dish eval set.
+**Eval sets:**
 
-### Changing or expanding the eval set
+| File | Description |
+|---|---|
+| `data/prompt_eval_cuisine.csv` | Original 30-dish golden eval set (Weeks 1–4) |
+| `data/prompt_eval_cuisine_fin.csv` | Edge-case-heavy set used for Week 5 adapter comparison |
 
-Edit `data/prompt_eval_cuisine.csv` directly — add or remove rows as needed. The format is two columns:
+The eval script also accepts `.xlsx` files and recognises `expert_label` as an alias for the `expected` column.
 
-```csv
-Name,expected
-Your Dish Name,Italian
-Another Dish,Chinese
-```
+## LoRA Adapter Fine-Tuning (Week 5)
 
-The eval script also accepts `.xlsx` files and recognises `expert_label` as an alias for the `expected` column, so spreadsheets exported from a labelling tool work without renaming columns.
+A LoRA adapter was trained on ~200 cuisine classification examples to fix **name-keyword bias** — cases where the dish name (e.g. "taco", "lasagna") overrides ingredient signals and produces the wrong label.
 
-To use a different file entirely:
+**Training setup:**
+- Base model: `unsloth/gemma-2-2b-it-bnb-4bit`
+- LoRA: r=16, alpha=32, trained with Unsloth SFTTrainer on Google Colab GPU
+- Exported as GGUF (q8_0) and registered in Ollama as `cuisine-classifier:latest`
+- Training format matches inference exactly: system prompt + few-shot user prompt + `CuisineResponse` JSON
 
+**Register the adapter (if not already done):**
 ```bash
-uv run python -m cuisine_classifier.evaluate --eval-set data/my_custom_eval.csv --verbose
-uv run python -m cuisine_classifier.evaluate --eval-set data/validation_sample.xlsx --verbose
+ollama create cuisine-classifier -f Modelfile
 ```
 
-Any number of dishes is supported. Each dish runs 2 model calls (one per leg), so time scales linearly — 30 dishes ≈ 5–10 min, 60 dishes ≈ 10–20 min. The live counter keeps you informed throughout.
+**Verify it's registered:**
+```bash
+ollama list | grep cuisine
+```
 
-> **Week 5 tip:** consider expanding to 50–60 dishes before running the LoRA fine-tuning comparison — more coverage gives a more reliable accuracy gap between prompt-only and adapter-based results.
+**Test on known hard cases:**
+```bash
+# Name-keyword bias: "taco" overrides fry-bread ingredients → base says Mexican, adapter says American
+uv run python -m cuisine_classifier "Navajo Tacos"
+
+# Regression check: phyllo pastry format overrides spice profile → both should say Other
+uv run python -m cuisine_classifier "Easy Baklava"
+
+# Regression check: sour cream / cream cheese markers → American, not Italian
+uv run python -m cuisine_classifier "Grandma's Best Ever Sour Cream Lasagna"
+```
+
+**Success threshold:** adapter accuracy ≥ 74% on `prompt_eval_cuisine_fin.csv` with no regressions on Baklava (→ Other) or American-style lasagna (→ American).
+
+**Actual results (2026-06-30, 42-dish eval set):**
+
+| Model | Accuracy | Notes |
+|---|---|---|
+| `gemma2:2b` (base) | 71% (30/42) | prompt-only |
+| `cuisine-classifier:latest` (Colab) | 93% (39/42) | measured in Colab training environment |
+| `cuisine-classifier:latest` (local) | **90.5% (38/42)** | `ollama.generate()` + manual Gemma2 template |
+
+Key fix: switching from `ollama.chat()` to `ollama.generate()` with the Gemma2 chat template applied manually closed the Colab vs local gap (76.2% → 90.5%). Remaining 4 failures (Beef Stroganoff, Potato Curry, Lamb Patties, Swedish Meatballs I) need additional training examples.
+
+---
 
 ## Embedding Fine-Tuning (Week 3)
 
@@ -220,13 +265,16 @@ src/cuisine_classifier/
 
 retrieval/
 ├── vector_store.py     # ChromaDB wrapper (add + query)
-├── populate.py         # Script to embed recipes into ChromaDB (200 at a time)
+├── populate.py         # Script to embed all recipes into ChromaDB (skips existing)
 └── chroma_db/          # Persistent vector store (auto-created on first run)
 
 models/
-└── ft-domain-embedding/
-    └── cuisine_mpnet_ft/   # Fine-tuned all-mpnet-base-v2 (output of embedder.py)
+├── ft-domain-embedding/
+│   └── cuisine_mpnet_ft/   # Fine-tuned all-mpnet-base-v2 (output of embedder.py)
+└── (GGUF adapter placed here or at project root)
 
+Modelfile               # Ollama Modelfile pointing to the GGUF adapter
+cuisine_adapter_q4.gguf # Downloaded GGUF adapter (q8_0, named q4 historically)
 app.py                  # Streamlit UI (project root)
 ```
 
