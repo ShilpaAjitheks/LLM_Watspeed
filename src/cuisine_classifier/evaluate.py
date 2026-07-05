@@ -10,7 +10,7 @@ import pandas as pd
 from cuisine_classifier.__main__ import load_config, load_dataset, predict_cuisine
 
 
-def evaluate_classifier(test_dishes, config, leg_label="", dataset=None, use_retrieval=False, vector_store=None):
+def evaluate_classifier(test_dishes, config, leg_label="", dataset=None, use_retrieval=False, vector_store=None, model_name=None):
     """
     Evaluate classifier on test dishes.
 
@@ -36,6 +36,7 @@ def evaluate_classifier(test_dishes, config, leg_label="", dataset=None, use_ret
             dataset=dataset,
             use_retrieval=use_retrieval,
             vector_store=vector_store,
+            model_name=model_name,
         )
         predicted = output["Cuisine"] if output else "ERROR"
         is_correct = predicted.lower() == expected.lower()
@@ -85,6 +86,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Evaluate cuisine classifier with ablation study")
     parser.add_argument("--config", type=str, default=None, help="Path to config file")
+    parser.add_argument("--model", type=str, default=None, help="Ollama model name to use (overrides config)")
     parser.add_argument("--eval-set", type=str, default=None, help="Path to eval CSV (Name, expected columns)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed per-dish predictions (all results)")
     parser.add_argument("--skip-baseline", action="store_true", help="Skip baseline leg and run context-enhanced only")
@@ -125,8 +127,9 @@ def main():
         print(f"Loaded {len(dataset)} recipes")
 
     test_dishes = [(row["Name"], row["expected"].strip()) for _, row in eval_df.iterrows()]
+    active_model = args.model or config["model"]["name"]
     print(f"\nRunning ablation study with {len(test_dishes)} test dishes")
-    print(f"Using model: {config['model']['name']}")
+    print(f"Using model: {active_model}")
 
     # Leg 1 — baseline: dish name only (no dataset context, no retrieval)
     base_accuracy = base_correct = base_total = base_predictions = None
@@ -134,14 +137,14 @@ def main():
         print("\n[1/3] Baseline — dish name only (no context, no retrieval)")
         print(f"{'─'*65}")
         base_accuracy, base_correct, base_total, base_predictions = evaluate_classifier(
-            test_dishes, config, leg_label="No Context", dataset=None, use_retrieval=False,
+            test_dishes, config, leg_label="No Context", dataset=None, use_retrieval=False, model_name=active_model,
         )
 
     # Leg 2 — context-enhanced: dataset lookup for ingredients + description
     print(f"\n[2/3] Context-Enhanced — dataset lookup (ingredients + description)")
     print(f"{'─'*65}")
     ctx_accuracy, ctx_correct, ctx_total, ctx_predictions = evaluate_classifier(
-        test_dishes, config, leg_label="With Context", dataset=dataset, use_retrieval=False,
+        test_dishes, config, leg_label="With Context", dataset=dataset, use_retrieval=False, model_name=active_model,
     )
 
     # Leg 3 — retrieval-augmented: context + ChromaDB few-shot (only if --retrieval passed)
@@ -163,7 +166,7 @@ def main():
             print(f"{'─'*65}")
             rag_accuracy, rag_correct, rag_total, rag_predictions = evaluate_classifier(
                 test_dishes, config, leg_label="With Retrieval", dataset=dataset,
-                use_retrieval=True, vector_store=vector_store,
+                use_retrieval=True, vector_store=vector_store, model_name=active_model,
             )
         except Exception as e:
             print(f"Error loading vector store: {e}", file=sys.stderr)
