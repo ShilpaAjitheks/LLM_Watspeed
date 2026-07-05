@@ -66,19 +66,24 @@ _STATIC_FEW_SHOT = (
     "Mom's Chicken and Dumplings    -> American  (biscuit-dough dumplings, not Chinese)\n"
     "The Ultimate Pasta Salad       -> American  (pasta in name, US picnic dish)\n"
     "Italian Wedding Cookies        -> American  ('Italian' name, US butter-almond cookie)\n"
-    "Baked Garlic Parmesan Chicken  -> American  (breadcrumb-Parmesan bake is US weeknight cooking — no tomato sauce or mozzarella, NOT Italian Parmigiana)\n"
+    "Baked Garlic Parmesan Chicken  -> American  (breadcrumb-Parmesan bake — no tomato sauce or mozzarella, NOT Italian Parmigiana)\n"
     "Chef John's Meatless Meatballs -> Italian   (substitute protein inherits the dish)\n"
+    "Twinkie® Tiramisu              -> Italian   (tiramisu format overrides Twinkie modifier)\n"
+    "Buffalo Chicken Calzone        -> Italian   (calzone format overrides Buffalo modifier)\n"
     "Tofu Tacos                     -> Mexican   (substitute protein inherits the dish)\n"
     "Baked BBQ Pulled Pork Nachos   -> Mexican   (nacho base is Mexican even with BBQ)\n"
-    "Navajo Tacos                   -> American  (fry-bread taco is US, NOT Mexican)\n"
     "Authentic Saag Paneer          -> Indian    (paneer + spinach + fenugreek)\n"
     "Authentic Chicken Tikka Masala -> Indian    (yogurt marinade + garam masala)\n"
     "Char Siu (Chinese BBQ Pork)    -> Chinese   ('BBQ' name, but hoisin/five-spice)\n"
+    "Bourbon Chicken                -> Chinese   (American-Chinese restaurant dish despite 'bourbon')\n"
+    "Keto Beef Egg Roll Slaw        -> Chinese   (egg roll format overrides Keto/Slaw)\n"
     "Chicken Lettuce Wraps          -> Chinese   (hoisin/soy stir-fried filling)\n"
     "Yaki Mandu (Korean Dumplings)  -> Other     (Korean — outside the five)\n"
     "Sunomono (Japanese Salad)      -> Other     (Japanese — outside the five)\n"
     "Pho Bo (Vietnamese Beef Soup)  -> Other     (Vietnamese — outside the five)\n"
     "French Onion Soup              -> Other     (French — outside the five)\n"
+    "Navajo Tacos                   -> American  (CRITICAL: 'Navajo' means Native American fry bread — American, NOT Mexican despite the word 'taco')\n"
+    "Indian Tacos                   -> American  (CRITICAL: same as Navajo Tacos — fry bread dish = American, NOT Mexican)\n"
 )
 
 
@@ -99,9 +104,10 @@ def build_prompt(dish_name, ingredients=None, description=None, few_shot_example
 
     return f"""{_STATIC_FEW_SHOT}{dynamic_str}
 REMINDER — these format rules override ingredients:
-- dish name contains fried rice / egg rolls / wontons / lo mein / dumplings → Chinese
+- dish name contains egg rolls / wontons / lo mein / dumplings → Chinese
 - dish name contains garlic bread / bruschetta / calzone / biscotti / tiramisu / lasagna / pizza dough → Italian
-- dish name contains taco / enchilada / burrito / quesadilla / nacho / tostada / fajita → Mexican (unless fry bread or Navajo)
+- dish name contains taco / enchilada / burrito / quesadilla / nacho / tostada / fajita → Mexican
+- EXCEPTION to taco rule: dish name contains Navajo / Indian Taco / fry bread → American (these are Native American dishes, NOT Mexican)
 - dish name contains Russian / Swedish / Danish / Polish / Korean / Vietnamese / Japanese / Thai / Filipino / Greek / French / German / Middle Eastern / Cuban / Brazilian / Peruvian / Caribbean / Jamaican / African / Irish / British → Other
 - generic everyday drink / snack / dessert / baked good with no foreign signal → American
 
@@ -109,7 +115,55 @@ Dish name: {dish_name}
 {context_str}"""
 
 
-def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector_store=None):
+_AMERICAN_ALIASES = {'Cajun', 'Creole', 'Hawaiian', 'Tex-Mex', 'Southern'}
+_VALID_LABELS = {'American', 'Italian', 'Indian', 'Mexican', 'Chinese', 'Other'}
+
+
+def _parse_free_form(text: str, dish_name: str, cuisine_types: list) -> dict:
+    """Parse free-form JSON output from the adapter (mirrors Colab extract_cuisine_label)."""
+    cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
+    cuisine = ""
+    reasoning = []
+    confidence = 80
+
+    obj_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if obj_match:
+        try:
+            parsed = json.loads(obj_match.group(0))
+            c = parsed.get("Cuisine", "").strip()
+            if c in _VALID_LABELS:
+                cuisine = c
+            elif c in _AMERICAN_ALIASES:
+                cuisine = "American"
+            elif c:
+                cuisine = "Other"
+            reasoning = parsed.get("Reasoning", [])
+            confidence = int(parsed.get("Confidence_score", 80))
+        except (ValueError, TypeError):
+            pass
+
+    if not cuisine:
+        m = re.search(r'"Cuisine"\s*:\s*"([^"]+)"', cleaned)
+        if m:
+            c = m.group(1).strip()
+            cuisine = c if c in _VALID_LABELS else ("American" if c in _AMERICAN_ALIASES else "Other")
+
+    if not cuisine:
+        matches = re.findall(r'\b(American|Italian|Indian|Mexican|Chinese|Other)\b', cleaned)
+        cuisine = matches[-1] if matches else "Other"
+
+    if cuisine not in cuisine_types:
+        cuisine = "Other"
+
+    return {
+        "Recipe_name": dish_name,
+        "Reasoning": reasoning if reasoning else [cleaned[:200]],
+        "Confidence_score": confidence,
+        "Cuisine": cuisine,
+    }
+
+
+def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector_store=None, model_name=None):
     cuisine_types = config["cuisine_types"]
     system_prompt = (
         "You are an expert cuisine classifier working on a recipe dataset from AllRecipes.com.\n"
@@ -188,19 +242,22 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         "    (pasta is just the vehicle). Alfredo, cacciatore, piccata, marsala, lasagna → Italian.\n"
         "13. 'Curry' alone is NOT Indian. Thai / coconut-lemongrass curry, Japanese curry, Caribbean curry → Other.\n"
         "    Only subcontinental masala / ghee / garam-masala curries → Indian.\n"
+        "    Shared spices (cardamom, cinnamon, honey, nuts, rosewater) do NOT determine cuisine alone —\n"
+        "    baklava uses these same spices but phyllo pastry format is Greek/Middle Eastern → Other, not Indian.\n"
         "14. Latin America is NOT Mexican: Cuban, Brazilian, Peruvian, Argentine, Puerto Rican, empanadas,\n"
         "    chimichurri → Other. Ceviche → Other unless the context is explicitly Mexican.\n"
         "15. Mexican casseroles count: enchilada / burrito / taco casseroles and layered Mexican dips → Mexican,\n"
         "    even when named 'easy' or 'casserole'.\n"
-        "16. Unmarked stir-fry, fried rice, lo mein, egg rolls, dumplings → Chinese by default.\n"
-        "    If marked Thai / Vietnamese / Korean / Japanese, the modifier wins → Other\n"
-        "    (Kimchi Fried Rice → Other; Yellow Curry Fried Rice → Other). Taiwanese → Chinese.\n"
+        "16. Unmarked lo mein, egg rolls, dumplings → Chinese by default.\n"
+        "    Fried rice and stir-fry: use ingredient signals to determine cuisine — if protein/spices are\n"
+        "    distinctly American (e.g. turkey, BBQ) or foreign-marked (Thai, Korean, Japanese), ingredients win.\n"
+        "    (Kimchi Fried Rice → Other; Yellow Curry Fried Rice → Other; Leftover Turkey Fried Rice → American). Taiwanese → Chinese.\n"
         "17. Other = any cuisine outside the five, e.g. French, Japanese, Korean, Thai, Vietnamese, Filipino,\n"
         "    Greek, Middle Eastern, German, Swedish, Danish, Russian, Polish, Cuban, Brazilian, Peruvian,\n"
         "    Caribbean / Jamaican, African, British / Irish (shepherd's pie, soda bread). NOTE: Hawaiian is the\n"
         "    exception — it goes to American (rule 8), not Other.\n\n"
         "IMPERATIVE DISH FORMAT OVERRIDES — ingredients never override these:\n"
-        "  Chinese formats: fried rice / egg rolls / wontons / lo mein / stir-fry in Chinese style / dumplings\n"
+        "  Chinese formats: egg rolls / wontons / lo mein / dumplings\n"
         "    → Chinese REGARDLESS of protein or modifier.\n"
         "    Exception: a Hawaiian/local fusion marker ('Local Kine') overrides the format rule → Other.\n"
         "    (Keto Beef Egg Roll Slaw → Chinese; Local Kine Wontons → Other)\n"
@@ -209,6 +266,9 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         "    → Italian REGARDLESS of modifier or dietary swap.\n"
         "    (Gluten-Free Biscotti → Italian; Twinkie Tiramisu → Italian; Whole Wheat Pizza Dough → Italian;\n"
         "      Meatball-Stuffed Garlic Bread → Italian)\n\n"
+        "  Other formats: baklava / phyllo pastry / quiche / strudel / crepe / blintz\n"
+        "    → Other REGARDLESS of filling or spice modifiers.\n"
+        "    (Easy Baklava → Other; Mini Quiche Lorraine → Other; Apple Strudel → Other)\n"
         "EXCEPTION TO DEFAULT RULE — do NOT classify as American when the dish name carries an explicit\n"
         "foreign nationality marker: Russian, Swedish, Danish, Polish, Korean, Vietnamese, Japanese, Thai, Filipino, "
         "Greek, French, German, Middle Eastern, Cuban, Brazilian, Peruvian, Caribbean, Jamaican, African, Irish, British, etc.\n"
@@ -248,34 +308,66 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
 
     few_shot_examples = None
     if use_retrieval and vector_store is not None:
-        query_text = " ".join(filter(None, [ingredients, description]))
+        query_text = " ".join(filter(None, [dish_name, ingredients, description]))
         if not query_text:
             query_text = dish_name
         candidates = vector_store.query(query_text, k=4)
-        few_shot_examples = [ex for ex in candidates if ex["dish_name"] != dish_name][:3]
-        print(f"[2/4] ChromaDB retrieval: {len(few_shot_examples)} few-shot examples retrieved ({vector_store.model}).")
+        _RETRIEVAL_DISTANCE_THRESHOLD = 0.18
+        few_shot_examples = [
+            ex for ex in candidates
+            if ex["dish_name"] != dish_name and ex.get("distance", 1.0) <= _RETRIEVAL_DISTANCE_THRESHOLD
+        ][:3]
+        if few_shot_examples:
+            print(f"[2/4] ChromaDB retrieval: {len(few_shot_examples)} few-shot examples retrieved ({vector_store.model}).")
+        else:
+            print(f"[2/4] ChromaDB retrieval: no close matches (threshold {_RETRIEVAL_DISTANCE_THRESHOLD}) — falling back to static few-shot only.")
     else:
         print(f"[2/4] ChromaDB retrieval: skipped — zero-shot mode.")
 
     prompt = build_prompt(dish_name, ingredients, description, few_shot_examples)
 
-    print(f"[3/4] Sending prompt to {config['model']['name']}...")
-    try:
-        result = ollama.chat(
-            model=config["model"]["name"],
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            format=CuisineResponse.model_json_schema(),
-            options={"temperature": config["model"]["temperature"]},
-        )
-        parsed = CuisineResponse.model_validate_json(result.message.content)
-        output = parsed.model_dump()
+    active_model = model_name or config["model"]["name"]
+    adapter_model = config.get("adapter", {}).get("name", "cuisine-classifier:latest")
+    use_adapter_format = (active_model == adapter_model)
 
-        if output["Cuisine"] not in cuisine_types:
-            print(f"Note: model returned '{output['Cuisine']}' — remapped to 'Other'.", file=sys.stderr)
-            output["Cuisine"] = "Other"
+    print(f"[3/4] Sending prompt to {active_model}...")
+    try:
+        if use_adapter_format:
+            # Replicate Colab inference exactly: apply Gemma2 chat template manually
+            # and use ollama.generate() to bypass Ollama's built-in template handling.
+            merged_user = system_prompt + "\n\n" + prompt + (
+                "\n\nRespond as JSON: {\"Recipe_name\": \"...\", \"Reasoning\": [...], "
+                "\"Confidence_score\": <int>, \"Cuisine\": \"<label>\"}"
+                "\nCuisine must be exactly one of: American, Italian, Indian, Mexican, Chinese, Other"
+                "\nAny cuisine outside these five (French, Russian, Japanese, Korean, Greek, etc.) must be labeled Other."
+            )
+            formatted_prompt = (
+                "<bos><start_of_turn>user\n"
+                + merged_user
+                + "<end_of_turn>\n<start_of_turn>model\n"
+            )
+            result = ollama.generate(
+                model=active_model,
+                prompt=formatted_prompt,
+                options={"temperature": config["model"]["temperature"]},
+            )
+            raw = result.response or ""
+            output = _parse_free_form(raw, dish_name, cuisine_types)
+        else:
+            result = ollama.chat(
+                model=active_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                format=CuisineResponse.model_json_schema(),
+                options={"temperature": config["model"]["temperature"]},
+            )
+            parsed = CuisineResponse.model_validate_json(result.message.content)
+            output = parsed.model_dump()
+            if output["Cuisine"] not in cuisine_types:
+                print(f"Note: model returned '{output['Cuisine']}' — remapped to 'Other'.", file=sys.stderr)
+                output["Cuisine"] = "Other"
 
         print(f"[4/4] Response received — classification complete.")
         return output, prompt, system_prompt, context_found, few_shot_examples
