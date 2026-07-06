@@ -1,0 +1,203 @@
+# Week 6 Semantic Search and RAG - Implementation Specs
+
+approach:
+  summary: >
+    Build a two-layer RAG pipeline for the cuisine classifier: Layer 1 (already built) produces
+    a k=3 neighbour ambiguity signal; Layer 2 embeds 6 cuisine knowledge cards into ChromaDB
+    and retrieves the 1-2 most relevant cards at query time, replacing hardcoded system prompt
+    rules with dynamic per-query context and exposing intermediate results in the Streamlit UI.
+  decisions:
+    just_in_time_context:
+      choice: Retrieve cuisine-specific knowledge cards (1-2 per query) via ChromaDB RAG
+      reasoning: >
+        Which cuisine knowledge is relevant depends entirely on the dish being classified —
+        injecting all 6 cards every time would bloat the prompt and dilute the signal.
+        ChromaDB retrieval on dish name + ingredients selects only the cards whose
+        ingredient/signal body is most similar to the query.
+
+    two_layer_retrieval:
+      choice: >
+        Layer 1 (existing) — k=3 neighbour ambiguity signal on ingredients + description;
+        Layer 2 (new) — independent ChromaDB similarity search on dish name + ingredients
+      reasoning: >
+        Layer 1 already provides an ambiguity level and candidate cuisines with a note.
+        Layer 2 runs an independent embedding search rather than being gated by Layer 1,
+        because the embedding spaces differ (Layer 1 uses ingredients+description,
+        Layer 2 uses dish name+ingredients) and independent retrieval captures format-word
+        signals that neighbour-based retrieval may miss.
+
+    data_source:
+      choice: cuisine_knowledge.md — 6 cuisine cards created offline via system prompt knowledge + Claude API
+      reasoning: >
+        The cards distil the existing system prompt rules into structured per-cuisine knowledge.
+        Using Claude API to generate them from the existing prompt ensures consistency with
+        the rules already in production, while the structured format (body vs metadata) allows
+        selective embedding and metadata filtering.
+
+    chunking_and_embedding:
+      choice: One chunk per cuisine card; embed body (Core ingredients + Signals only)
+      reasoning: >
+        Each card is already a coherent semantic unit — splitting would break the signal.
+        Only the body (ingredients and dish-name/format keywords) is embedded because that is
+        what the query (dish name + ingredients) will match against. Rules and traps are
+        structured metadata, not free-text to embed.
+
+    metadata_usage:
+      choice: >
+        Format rules, Confused with, and Trap stored as ChromaDB metadata fields;
+        Format rules REPLACE hardcoded system prompt rules; Confused with and Trap
+        injected into the prompt alongside the retrieved card body.
+      reasoning: >
+        Replacing hardcoded rules with retrieved ones makes the system prompt leaner and
+        keeps rules in one place (cuisine_knowledge.md). Trap and Confused with are
+        passed explicitly so the LLM can reason against dish-level misclassification warnings.
+
+    evaluation:
+      choice: End-to-end accuracy on prompt_eval_cuisine_fin.csv vs static prompt baseline (79%)
+      reasoning: >
+        End-to-end accuracy is the ground truth metric. Colab notebook confirmed:
+        static 79% → RAG 93% (best config: amb k=3, cards k=2, temperature=0).
+        Local results may differ slightly from Colab. Retrieval correctness is tracked
+        optionally via failure analysis: wrong label + wrong card = retrieval failure;
+        wrong label + right card = reasoning failure. Success threshold is >= 83.3% locally.
+
+    problem_statement_update:
+      choice: Classification now explains WHY a dish belongs to a cuisine using retrieved markers
+      reasoning: >
+        Retrieved cards give the model explicit ingredients, signals, and traps to cite in
+        its reasoning output, making explanations grounded in cuisine-specific evidence
+        rather than vague pattern matching.
+
+    streamlit_ui:
+      choice: >
+        Show ambiguity signal (level + note) and retrieved card names + Trap field as
+        intermediate results before final classification; dish name only as input
+      reasoning: >
+        Visible intermediate results make retrieval failures easy to debug — if the wrong
+        card came back, it is immediately visible in the UI without needing to inspect logs.
+        Ingredients are auto-looked up from the dataset, matching the existing app flow.
+
+tasks:
+  task_1:
+    name: Build ChromaDB collection from cuisine_knowledge.md
+    details: |
+      Create src/cuisine_classifier/knowledge_store.py:
+      1. Parse cuisine_knowledge.md into 6 cuisine card dicts (one per cuisine).
+         Each card must have:
+           - text: Core ingredients + Signals (the embedded body)
+           - metadata: { cuisine, format_rules, confused_with, trap }
+      2. Initialise a ChromaDB persistent client pointing to retrieval/chroma_db_mpnet/
+         (same path as Layer 1 — collections are isolated by name).
+      3. Create a collection named "cuisine_knowledge_mpnet" using the fine-tuned mpnet model
+         (models/ft-domain-embedding/cuisine_mpnet_ft) — same embed model as Layer 1.
+      4. Add all 6 cards with their text and metadata.
+      5. Expose a function: get_knowledge_store() -> chromadb.Collection
+         so other modules can call it without re-initialising.
+      Run once to populate; add a guard so it skips re-embedding if the collection
+      already has 6 documents.
+
+  task_2:
+    name: Implement Layer 2 retrieve_context using ChromaDB
+    details: |
+      In src/cuisine_classifier/__main__.py (or a new retrieval.py):
+      1. Implement retrieve_cuisine_cards(dish_name: str, ingredients: str, n_results: int = 2)
+         that:
+           a. Queries the "cuisine_knowledge" ChromaDB collection with
+              query_texts=[f"{dish_name}. {ingredients}"]
+           b. Returns the top n_results cards as dicts:
+              { cuisine, format_rules, confused_with, trap }
+      2. The function should use get_knowledge_store() from task_1.
+      3. Do NOT hard-filter by Layer 1 candidates — keep the two layers independent.
+
+  task_3:
+    name: Wire both layers into classify_with_rag
+    details: |
+      Update the main classification function (classify_with_rag or predict_cuisine):
+      1. Call ambiguity_signal(dish_name, ingredients) → get level, candidates, note.
+      2. Call retrieve_cuisine_cards(dish_name, ingredients) → get top 2 cards.
+      3. Build a leaner system prompt (remove hardcoded cuisine rules — they now come
+         from retrieved cards).
+      4. Build the user prompt including:
+           - Ambiguity signal: level + note
+           - Retrieved cards: for each card, include cuisine name, format_rules,
+             confused_with, and trap
+           - Dish name + ingredients (looked up from dataset as before)
+      5. Call Ollama with the new prompt and return the classification result.
+      6. Return intermediate results alongside the final classification:
+           { ambiguity, retrieved_cards, cuisine, reasoning, confidence_score }
+      Keep the existing model_name parameter so the Base model / Adapter toggle still works.
+
+  task_4:
+    name: Update Streamlit UI to show intermediate RAG results
+    details: |
+      In app.py:
+      1. Dish name input only — ingredients/description auto-looked up (no change needed).
+      2. After classification, display intermediate results in an expander or columns:
+           - Ambiguity signal: show level (confident/mild/high) + note as a coloured badge
+             or info box (e.g. st.info for mild, st.warning for high).
+           - Retrieved cards: show which 2 cuisines were retrieved and their Trap field
+             (e.g. st.caption or a small table).
+      3. Show final classification (Cuisine, Reasoning, Confidence) as before.
+      4. Existing Base model / Adapter radio toggle must still work — pass model_name through.
+      5. Handle the case where ChromaDB collection is not yet populated:
+           show st.warning("Knowledge store not initialised — run: uv run python -m cuisine_classifier.knowledge_store") rather than crashing.
+
+  task_5:
+    name: Run evaluation and compare vs Week 5 baseline
+    details: |
+      Run end-to-end accuracy on prompt_eval_cuisine_fin.csv:
+        uv run python -m cuisine_classifier.evaluate --num-samples all --verbose
+      Record:
+        - Overall accuracy (target: >= 83.3%, i.e. 35/42)
+        - Any regressions vs Week 5 on known hard cases
+          (Chicken Teriyaki Tacos → Other, Easy Baklava → Other, Navajo Tacos → American)
+      Optional retrieval failure analysis:
+        For each wrong prediction, log which cards were retrieved.
+        Classify failure as retrieval failure (wrong card) or reasoning failure (right card,
+        wrong label). Save to data/context_enhanced_failures.csv if doing this analysis.
+
+integration_steps:
+  - "Create src/cuisine_classifier/knowledge_store.py and run it once to populate ChromaDB: uv run python -m cuisine_classifier.knowledge_store"
+  - "Add retrieve_cuisine_cards() to __main__.py or retrieval.py, using the same embed model as Layer 1"
+  - "Update classify_with_rag / predict_cuisine to call both layers and return intermediate results"
+  - "Trim hardcoded cuisine rules from the system prompt — Format rules now come from retrieved cards"
+  - "Update app.py to display ambiguity signal and retrieved card Trap field as intermediate results"
+  - "Verify existing Base model / Adapter toggle still passes model_name through correctly"
+
+evaluation_plan:
+  metrics: [end_to_end_accuracy, optional_retrieval_failure_analysis]
+  dataset_size: prompt_eval_cuisine_fin.csv (42 dishes, edge-case-heavy)
+  baseline: "Static prompt base model: 79%. Week 5 adapter local: 90.5% (38/42). Colab RAG result: 93% (best config: amb k=3, cards k=2, temperature=0 — Colab result, local may differ)."
+
+reference_materials:
+  notebook: notebooks/week6_semantic_search_and_rag.ipynb
+  knowledge_source: data/cuisine_knowledge.md
+  eval_benchmark: data/prompt_eval_cuisine_fin.csv
+  layer1_implementation: src/cuisine_classifier/__main__.py
+
+success_criteria:
+  minimum: >
+    ChromaDB collection populated with 6 cuisine cards, retrieve_cuisine_cards() returns
+    correct cards for a test query, classify_with_rag returns intermediate results
+    (ambiguity + retrieved cards), Streamlit UI shows intermediate results without crashing,
+    and end-to-end accuracy >= 90.5% (no regression vs Week 5 adapter).
+  good: >
+    Accuracy improves beyond 83.3% on prompt_eval_cuisine_fin.csv, retrieved cards visibly
+    explain correct classifications in the Streamlit UI (Trap field catches at least one
+    known hard case), and the system prompt is measurably shorter than Week 5.
+
+verification:
+  cli:
+    - "Populate ChromaDB knowledge store: uv run python -m cuisine_classifier.knowledge_store"
+    - "Confirm 6 documents in collection (output should say 'Knowledge store ready: 6 cards')"
+    - "Test Layer 2 retrieval on a known case: uv run python -c \"from cuisine_classifier.knowledge_store import get_knowledge_store; col = get_knowledge_store(); print(col.query(query_texts=['Chicken Teriyaki Tacos. teriyaki soy sesame cabbage tortilla'], n_results=2)['metadatas'])\""
+    - "Run full evaluation: uv run python -m cuisine_classifier.evaluate --num-samples all --verbose"
+    - "Confirm accuracy >= 83.3% (35/42) in evaluation output"
+    - "Test a known hard case end-to-end: uv run python -m cuisine_classifier 'Easy Baklava' (expect Other)"
+  streamlit:
+    - "Start the app: uv run streamlit run app.py"
+    - "Before knowledge store is populated: app should show a warning message, not crash"
+    - "After populating: enter 'Chicken Teriyaki Tacos' — confirm ambiguity signal and retrieved card names appear as intermediate results"
+    - "Check that the Trap field for the retrieved cards is visible in the UI"
+    - "Switch between Base model and Adapter using the radio toggle — confirm both still work"
+    - "Enter 'Easy Baklava' — confirm Other is predicted and the Other card Trap is shown"
