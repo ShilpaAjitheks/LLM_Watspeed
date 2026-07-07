@@ -41,6 +41,7 @@ Controls available:
   - **Compare both** — runs both models on the same input and shows results side by side in two columns
 - **Look it up in the recipe dataset** — fetches ingredients and description for richer context
 - **Use retrieval-augmented few-shot** — retrieves 3 similar recipes from ChromaDB and uses them as few-shot examples in the prompt. Requires the vector store to be populated first (see below).
+- **Use cuisine knowledge RAG** — Week 6 two-layer RAG: Layer 1 computes an ambiguity signal (k=3 neighbour retrieval), Layer 2 retrieves the top 2 cuisine knowledge cards from ChromaDB. Requires the mpnet vector store and knowledge store to be populated first. Only applies to the base model (the adapter uses its own trained format).
 
 ## Output
 
@@ -143,6 +144,9 @@ uv run python -m cuisine_classifier.evaluate --verbose --retrieval --embed-model
 # Use the Week 5 edge-case eval set
 uv run python -m cuisine_classifier.evaluate --eval-set data/prompt_eval_cuisine_fin.csv --skip-baseline --verbose
 
+# Week 6 RAG ablation leg — context-enhanced + cuisine knowledge RAG
+uv run python -m cuisine_classifier.evaluate --eval-set data/prompt_eval_cuisine_fin.csv --skip-baseline --rag --verbose
+
 # Compare base model vs adapter on the same eval set
 uv run python -m cuisine_classifier.evaluate --eval-set data/prompt_eval_cuisine_fin.csv --skip-baseline --verbose
 uv run python -m cuisine_classifier.evaluate --eval-set data/prompt_eval_cuisine_fin.csv --model cuisine-classifier:latest --skip-baseline --verbose
@@ -157,6 +161,7 @@ The script runs each dish one by one and prints a live counter. At the end it sh
 | `--skip-baseline` | Skip the dish-name-only leg, run context-enhanced only |
 | `--verbose` | Show every prediction, not just failures |
 | `--retrieval --embed-model <model>` | Add retrieval-augmented as a third leg |
+| `--rag` | Add Week 6 cuisine knowledge RAG as an ablation leg |
 
 **Eval sets:**
 
@@ -213,6 +218,36 @@ Key fix: switching from `ollama.chat()` to `ollama.generate()` with the Gemma2 c
 
 ---
 
+## Cuisine Knowledge RAG (Week 6)
+
+A two-layer retrieval-augmented generation pipeline that replaces the static hardcoded system prompt rules with dynamically retrieved cuisine knowledge cards.
+
+**Layer 1 — Ambiguity signal:** queries the mpnet recipe vector store with k=3 neighbours. Returns level (`confident` / `mild` / `high`), the candidate cuisines, and a note (e.g. "neighbours split across ['Mexican', 'Chinese']").
+
+**Layer 2 — Cuisine knowledge cards:** independently queries a separate ChromaDB collection (`cuisine_knowledge_mpnet`) using dish name + ingredients as the query. Returns the top 2 cuisine cards, each containing Format rules, Confused-with, and Trap fields.
+
+Both signals are combined into the prompt. The model is explicitly instructed: *"If a retrieved trap names this exact dish, follow it over all other signals."*
+
+**Knowledge cards** are stored in `data/cuisine_knowledge.md` — 6 cards (one per cuisine) created offline. Each card has:
+- **Body** (embedded): Core ingredients + Signals — used for similarity search
+- **Metadata** (not embedded, passed to LLM): Format rules, Confused with, Trap
+
+**Populate the knowledge store (run once):**
+```bash
+uv run python retrieval/knowledge_store.py
+```
+
+**Results on `prompt_eval_cuisine_fin.csv` (42 dishes):**
+
+| Mode | Accuracy | Notes |
+|---|---|---|
+| Context-Enhanced | 73.8% (31/42) | dataset lookup only |
+| Cuisine Knowledge RAG | **90.5% (38/42)** | +16.7pp over context-enhanced |
+
+Remaining 3 failures: Stuffed Peppers, Hoisin-Glazed Salmon, Gluten-Free Biscotti — all cases where the Other knowledge card was ranked first in Layer 2 retrieval.
+
+---
+
 ## Embedding Fine-Tuning (Week 3)
 
 `embedder.py` fine-tunes `all-mpnet-base-v2` on cuisine domain pairs so the embedding space better separates dishes by cuisine. The fine-tuned model is then available as the `mpnet` option in the retrieval pipeline.
@@ -264,9 +299,11 @@ src/cuisine_classifier/
 └── README.md
 
 retrieval/
-├── vector_store.py     # ChromaDB wrapper (add + query)
+├── vector_store.py     # ChromaDB wrapper (add + query) — recipe collection
 ├── populate.py         # Script to embed all recipes into ChromaDB (skips existing)
-└── chroma_db/          # Persistent vector store (auto-created on first run)
+├── knowledge_store.py  # Week 6: embed + query cuisine knowledge cards
+├── chroma_db/          # Persistent vector store for nomic-embed-text
+└── chroma_db_mpnet/    # Persistent vector store for mpnet (recipes + knowledge cards, separate collections)
 
 models/
 ├── ft-domain-embedding/
