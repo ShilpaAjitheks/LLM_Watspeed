@@ -1,0 +1,192 @@
+# Week 7 Multimodal Models - Implementation Specs
+
+approach:
+  summary: >
+    Add an optional recipe card image upload to the cuisine classifier app; use gemma4:e4b
+    to extract dish_name, ingredients, and description from the image, validate extraction
+    quality, and feed the extracted fields into the existing Week 6 ChromaDB RAG pipeline
+    as a drop-in replacement for CSV context enhancement.
+  decisions:
+    visual_input:
+      choice: Structured recipe card photo (optional upload alongside typed dish name)
+      reasoning: >
+        A recipe card is structured — it contains labelled fields — making extraction
+        more reliable than an unstructured food photo. Dish name is always typed by the
+        user; the image supplies ingredients and description so the user doesn't have
+        to type those manually.
+
+    extraction_schema:
+      choice: '{"dish_name": str, "ingredients": list[str], "description": str}'
+      reasoning: >
+        These are the exact fields the downstream pipeline consumes. dish_name is
+        extracted for cross-validation against the typed input; ingredients and
+        description replace the CSV context enhancement lookup.
+
+    vision_model:
+      choice: gemma4:e4b via Ollama
+      reasoning: Multimodal model available locally; reads images and returns text.
+
+    malformed_output_handling:
+      choice: Strip markdown fences first, then gemma2:2b corrector if parse fails
+      reasoning: >
+        Vision models often wrap JSON in markdown fences or add preamble text.
+        A cheap text-only corrector model repairs formatting without re-running the
+        expensive vision model. If correction also fails, return None and surface the
+        raw output for debugging.
+
+    quality_checks:
+      choice: Structural completeness + semantic plausibility
+      reasoning: >
+        Structural: all three fields present with correct Python types
+        (ingredients=list, description=str).
+        Semantic: dish_name substring match against typed input (case-insensitive),
+        len(ingredients) >= 3, description non-empty string.
+        Mismatch between typed and extracted dish_name triggers a user warning
+        asking them to confirm before classifying.
+
+    pipeline_connection:
+      choice: Extracted ingredients + description fed directly into Week 6 ChromaDB RAG
+      reasoning: >
+        The downstream pipeline is unchanged. Extraction output replaces the CSV
+        context enhancement lookup as the source of ingredients and description.
+        Dish name for ChromaDB query 2 always comes from the typed input.
+
+    fallback:
+      choice: Prompt user to fall back to context enhancement or re-upload on failure
+      reasoning: >
+        If no image is uploaded or extraction fails, the pipeline degrades gracefully
+        to CSV context enhancement rather than blocking the user.
+
+    streamlit_ui:
+      choice: Single page — dish name text input + optional image upload widget (no tabs)
+      reasoning: >
+        Image upload augments the text input rather than replacing it. On successful
+        extraction show "Extracted successfully". On failure show "Extraction failed —
+        fall back to context enhancement or try a different image?" with two action
+        buttons.
+
+    problem_statement_update:
+      choice: Adds multimodality for UX
+      reasoning: >
+        User can bring their own recipe card image instead of relying on the CSV
+        backend for ingredients and description. The core classification task is
+        unchanged; accuracy is expected to match context enhancement.
+
+tasks:
+  task_1:
+    name: Create vision extraction module
+    details: |
+      Create src/cuisine_classifier/vision.py with:
+      - VISION_MODEL = "gemma4:e4b"
+      - CORRECTOR_MODEL = "gemma2:2b"
+      - EXTRACTION_PROMPT asking for JSON with dish_name (str), ingredients (list[str]),
+        description (str) — no markdown, no explanation
+      - load_image_b64(image_path) -> str: reads image file, returns base64 string
+      - extract_recipe_raw(image_path) -> str: calls ollama.chat with VISION_MODEL +
+        image, returns raw text response
+      - strip_markdown_fences(text) -> str: removes ```json ... ``` wrappers with re.sub
+      - correct_with_model(malformed_text) -> str: calls CORRECTOR_MODEL to reformat
+        malformed output to match schema
+      - parse_extraction(raw_text, max_retries=1) -> Optional[dict]: strip fences →
+        json.loads → if fails, call corrector and retry → if still fails return None
+      - extract_from_image(image_path) -> Optional[dict]: orchestrates the full
+        extraction and parse pipeline
+
+  task_2:
+    name: Implement extraction quality checks
+    details: |
+      Add check_extraction(extracted, typed_dish_name) -> dict to vision.py:
+      Structural completeness:
+        - "dish_name" in extracted and isinstance(extracted["dish_name"], str)
+        - "ingredients" in extracted and isinstance(extracted["ingredients"], list)
+        - "description" in extracted and isinstance(extracted["description"], str)
+      Semantic plausibility:
+        - typed_dish_name.lower() in extracted["dish_name"].lower() (warn if mismatch,
+          do not hard-fail — return a warning flag for the UI to display)
+        - len(extracted["ingredients"]) >= 3
+        - extracted["description"].strip() != ""
+      Return: {"passed": bool, "issues": list[str], "dish_name_mismatch": bool,
+               "extracted_dish_name": str}
+
+  task_3:
+    name: Wire image extraction into the classifier pipeline
+    details: |
+      In src/cuisine_classifier/__main__.py (or a new pipeline.py):
+      - Accept optional image_path parameter
+      - If image_path provided:
+          result = extract_from_image(image_path)
+          quality = check_extraction(result, typed_dish_name)
+          if not quality["passed"]: surface issues and offer fallback
+          if quality["dish_name_mismatch"]: warn user
+          if passed: use result["ingredients"] and result["description"] as
+            context for ChromaDB RAG (replacing CSV context enhancement)
+      - If no image_path or extraction fails: fall back to CSV context enhancement
+      - ChromaDB query 1: ingredients + description as embedding query → few-shot
+        examples → ambiguity classification
+      - ChromaDB query 2: typed dish_name + ingredients → cuisine knowledge cards
+      - gemma2:2b classifies cuisine from all RAG outputs → label + reasoning +
+        confidence
+
+  task_4:
+    name: Update Streamlit app with image upload
+    details: |
+      In app.py:
+      - Add st.file_uploader("Upload a recipe card (optional)", type=["png","jpg","jpeg"])
+        below the dish name text input on the existing page (no new tabs)
+      - If file uploaded:
+          save to a temp path (use tempfile.NamedTemporaryFile)
+          call extract_from_image(tmp_path)
+          run check_extraction
+          if passed: st.success("Extracted successfully")
+          if dish_name_mismatch: st.warning(f"Image dish name '{extracted_dish_name}'
+            differs from typed '{typed_dish_name}'. Continue?") with confirm button
+          if failed: st.error("Extraction failed.")
+            show two buttons: "Use context enhancement instead" / "Try a different image"
+      - Classify button triggers full pipeline using extracted context (or CSV fallback)
+      - Display: cuisine label, reasoning, confidence score
+
+integration_steps:
+  - Add src/cuisine_classifier/vision.py (new file — all extraction logic lives here)
+  - Import extract_from_image and check_extraction in __main__.py / pipeline entry point
+  - Add optional image_path parameter to the classify function; when provided, call
+    vision pipeline instead of CSV context enhancement
+  - Update app.py to add st.file_uploader and conditional extraction flow
+  - No changes needed to ChromaDB setup, RAG retrieval, or classification prompt
+
+evaluation_plan:
+  metrics:
+    - Extraction pass rate (% of uploaded cards where quality check passes)
+    - Cuisine accuracy on image path vs context enhancement path (should match)
+    - Dish name mismatch rate (% of uploads where extracted name differs from typed)
+  dataset_size: Same eval set as weeks 4-5 (prompt_eval_cuisine_fin.csv)
+  baseline: Context enhancement path accuracy from Week 5/6
+
+reference_materials:
+  notebook: notebooks/week7_multimodal_models.ipynb
+
+success_criteria:
+  minimum: >
+    Uploading a recipe card image extracts ingredients and description, passes quality
+    check, and produces a cuisine classification matching the context enhancement path
+    for the same dish.
+  good: >
+    Dish name mismatch warning works correctly; extraction failure gracefully falls back
+    to context enhancement with a clear user message; extraction pass rate >= 75% on
+    test recipe cards.
+
+verification:
+  cli:
+    - "Ensure gemma4:e4b is available: ollama list | grep gemma4"
+    - "Pull if missing: ollama pull gemma4:e4b"
+    - "Test extraction on a sample image: uv run python -c \"from src.cuisine_classifier.vision import extract_from_image; print(extract_from_image('data/sample_recipes/test_card.png'))\""
+    - "Verify quality check passes: output should show all three fields with ingredients as a list"
+    - "Run classify with image path: uv run python -m cuisine_classifier 'Chicken Tikka Masala' --image path/to/card.png"
+    - "Verify output includes cuisine label, reasoning, and confidence"
+  streamlit:
+    - "Run the app: uv run streamlit run app.py"
+    - "Open http://localhost:8501"
+    - "Type a dish name and upload a recipe card image"
+    - "Verify 'Extracted successfully' message appears after upload"
+    - "Click Classify and verify cuisine label + reasoning + confidence are displayed"
+    - "Test failure path: upload a non-recipe image and verify the fallback prompt appears"
+    - "Test no-image path: classify without uploading and verify context enhancement is used"
