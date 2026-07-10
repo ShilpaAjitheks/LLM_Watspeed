@@ -144,7 +144,7 @@ verification:
     - Confirm 3 results returned with cuisine_type and dish_name in each result
     - Run: uv run python -m cuisine_classifier "Vegetable Quesadillas" — confirm zero-shot mode still works
   streamlit:
-    - Run: streamlit run app.py
+    - Run: uv run streamlit run app.py
     - Open http://localhost:8501
     - Type "Vegetable Quesadillas", leave retrieval toggle OFF — confirm zero-shot result shows as before
     - Enable "Use retrieval-augmented few-shot" checkbox, click Classify

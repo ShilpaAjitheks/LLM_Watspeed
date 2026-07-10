@@ -47,7 +47,7 @@ tasks:
       - Load config and dataset once at startup (not on every button click)
       - UI: st.text_input for dish name, st.button("Classify"), st.spinner while running
       - Display output: cuisine_type, confidence_score, reasoning from the JSON result
-      - Run with: streamlit run app.py
+      - Run with: uv run streamlit run app.py
 
   task_4:
     name: Update problem_statement.md
@@ -64,7 +64,7 @@ integration_steps:
   - "Future: enrich pairs with ingredients + description, re-run eval, then integrate mpnet into Streamlit for embedding-based inference"
   - app.py imports predict_cuisine() directly from src/cuisine_classifier/__main__.py — uses Ollama/gemma2:2b for classification
   - Dataset loaded once at app startup using load_dataset() and load_config() from the cuisine_classifier package
-  - Run Streamlit app with: streamlit run app.py
+  - Run Streamlit app with: uv run streamlit run app.py
 
 evaluation_plan:
   metrics: [mean_cosine_similarity_close, mean_cosine_similarity_far, close_far_gap]
@@ -84,7 +84,7 @@ verification:
     - Run embedding evaluation script on 120 pairs with fine-tuned model — confirm gap ≥ 0.2
     - Run: uv run python -m cuisine_classifier "Vegetable Quesadillas" — confirm classifier still works
   streamlit:
-    - Run: streamlit run app.py
+    - Run: uv run streamlit run app.py
     - Open http://localhost:8501 in browser
     - Type "Vegetable Quesadillas" in the dish name input and click Classify
     - Confirm output shows cuisine_type=Mexican, a confidence_score integer, and a non-empty reasoning string
