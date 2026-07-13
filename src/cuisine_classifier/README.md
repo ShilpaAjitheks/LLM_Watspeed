@@ -24,12 +24,27 @@ uv run python -m cuisine_classifier "Pasta" --no-context
 
 # Use a custom dataset
 uv run python -m cuisine_classifier "Spaghetti" --dataset path/to/recipes.csv
+
+# Context-enhanced + few-shot retrieval (fine-tuned mpnet, Week 3)
+uv run python -m cuisine_classifier "Bourbon Chicken" --retrieval
+
+# Context-enhanced + few-shot retrieval using nomic embeddings
+uv run python -m cuisine_classifier "Bourbon Chicken" --retrieval --embed-model nomic-embed-text
+
+# Context-enhanced + retrieval + cuisine knowledge RAG (all layers)
+uv run python -m cuisine_classifier "Bourbon Chicken" --retrieval --rag
+
+# Use Week 6 cuisine knowledge RAG only
+uv run python -m cuisine_classifier "Bourbon Chicken" --rag
+
+# Classify from a recipe card image (Week 7 — extracts ingredients and description via llava:7b)
+uv run python -m cuisine_classifier "Chicken Teriyaki Tacos" --image path/to/recipe_card.png
 ```
 
 ### Streamlit App
 
 ```bash
-streamlit run app.py
+uv run streamlit run app.py
 ```
 
 Open [http://localhost:8501](http://localhost:8501), enter a dish name, and click **Classify** to see the cuisine type, confidence score, and reasoning.
@@ -42,6 +57,7 @@ Controls available:
 - **Look it up in the recipe dataset** — fetches ingredients and description for richer context
 - **Use retrieval-augmented few-shot** — retrieves 3 similar recipes from ChromaDB and uses them as few-shot examples in the prompt. Requires the vector store to be populated first (see below).
 - **Use cuisine knowledge RAG** — Week 6 two-layer RAG: Layer 1 computes an ambiguity signal (k=3 neighbour retrieval), Layer 2 retrieves the top 2 cuisine knowledge cards from ChromaDB. Requires the mpnet vector store and knowledge store to be populated first. Only applies to the base model (the adapter uses its own trained format).
+- **Upload a recipe card (optional)** — Week 7 image upload: extracts ingredients and description from a recipe card photo using `llava:7b` (vision model) with `gemma2:2b` as a corrector for malformed output. Runs structural completeness and semantic plausibility checks before feeding extracted context into the pipeline. Falls back to dataset context if image is rejected.
 
 ## Output
 
@@ -139,7 +155,7 @@ uv run python -m cuisine_classifier.evaluate --verbose
 uv run python -m cuisine_classifier.evaluate --verbose --skip-baseline
 
 # Three-leg ablation: add retrieval-augmented as third leg
-uv run python -m cuisine_classifier.evaluate --verbose --retrieval --embed-model all-mpnet-base-v2
+uv run python -m cuisine_classifier.evaluate --verbose --retrieval --embed-model mpnet
 
 # Use the Week 5 edge-case eval set
 uv run python -m cuisine_classifier.evaluate --eval-set data/prompt_eval_cuisine_fin.csv --skip-baseline --verbose
@@ -160,8 +176,19 @@ The script runs each dish one by one and prints a live counter. At the end it sh
 | `--model` | Ollama model name to use (overrides config default `gemma2:2b`) |
 | `--skip-baseline` | Skip the dish-name-only leg, run context-enhanced only |
 | `--verbose` | Show every prediction, not just failures |
-| `--retrieval --embed-model <model>` | Add retrieval-augmented as a third leg |
-| `--rag` | Add Week 6 cuisine knowledge RAG as an ablation leg |
+| `--retrieval --embed-model <mpnet\|nomic-embed-text>` | Add few-shot retrieval (Week 3) as a third leg — queries ChromaDB for 3 similar recipes and injects them as dynamic few-shot examples. `--embed-model` is required when using `--retrieval` |
+| `--rag` | Add Week 6 cuisine knowledge RAG as an ablation leg — retrieves cuisine knowledge cards (format rules, traps) from ChromaDB; becomes Leg 4 when combined with `--retrieval` |
+
+**Leg numbering:**
+
+| Flags used | Leg 2 | Leg 3 | Leg 4 |
+|---|---|---|---|
+| `--skip-baseline` | Context-Enhanced | — | — |
+| `--skip-baseline --retrieval --embed-model mpnet` | Context-Enhanced | Few-shot Retrieval (Week 3) | — |
+| `--skip-baseline --rag` | Context-Enhanced | Cuisine Knowledge RAG (Week 6) | — |
+| `--skip-baseline --retrieval --embed-model mpnet --rag` | Context-Enhanced | Few-shot Retrieval (Week 3) | Cuisine Knowledge RAG (Week 6) |
+
+> Leg 1 (dish name only) is included when `--skip-baseline` is omitted.
 
 **Eval sets:**
 
@@ -248,6 +275,23 @@ Remaining 3 failures: Stuffed Peppers, Hoisin-Glazed Salmon, Gluten-Free Biscott
 
 ---
 
+## Vision Extraction (Week 7)
+
+Adds optional recipe card image upload as an alternative to CSV context enhancement. When an image is uploaded, `vision.py` runs a full extraction and quality check pipeline before feeding context into the Week 6 RAG pipeline.
+
+**Extraction pipeline (`vision.py`):**
+1. `llava:7b` reads the image and returns JSON with `dish_name`, `ingredients` (list), `description` (string)
+2. Markdown fences stripped; if JSON parse fails, `gemma2:2b` corrector reformats the output
+3. If correction also fails, returns `None` and surfaces raw output
+
+**Quality checks (`check_extraction`):**
+- Structural completeness: all three fields present with correct types (`ingredients` must be a list, `description` must be a string)
+- Semantic plausibility: at least 3 ingredients, non-empty description, dish name similarity ≥ 0.75 (fuzzy match via `SequenceMatcher`) against typed dish name
+
+**Note on model choice:** `gemma4:e4b` (used in the notebook on Colab/Linux) crashes on Windows with a stack buffer overrun in Ollama. `llava:7b` is used locally as a drop-in replacement with the same API. Switch back to `gemma4:e4b` by changing `VISION_MODEL` in `vision.py` when running on Linux/Colab.
+
+---
+
 ## Embedding Fine-Tuning (Week 3)
 
 `embedder.py` fine-tunes `all-mpnet-base-v2` on cuisine domain pairs so the embedding space better separates dishes by cuisine. The fine-tuned model is then available as the `mpnet` option in the retrieval pipeline.
@@ -296,6 +340,7 @@ src/cuisine_classifier/
 ├── embedder.py         # Fine-tuning script for all-mpnet-base-v2 on domain pairs
 ├── domain_pairs.py     # 120 labeled close/far pairs for embedding fine-tuning
 ├── config.yaml         # Model settings and cuisine types
+├── vision.py           # Week 7: image extraction pipeline (llava:7b + gemma2:2b corrector + quality checks)
 └── README.md
 
 retrieval/
