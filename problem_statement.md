@@ -22,7 +22,7 @@ Classification — the LLM picks one label from six fixed cuisine categories bas
 4. **Embedding fine-tuning** (Week 2) — fine-tuned `all-mpnet-base-v2` on 120 cuisine domain pairs improves retrieval separability (cosine gap: 0.558 post fine-tune vs baseline)
 5. **Few-shot retrieval** (Week 3) — ChromaDB queries ingredients + description to retrieve 3 semantically similar labeled recipes as dynamic few-shot examples
 6. **Prompt engineering + Dataset labeling** (Week 4) — system prompt with format override rules and chain-of-thought reasoning instructions; Pydantic `CuisineResponse` schema enforces structured JSON output; 20 static boundary few-shot examples injected into the user prompt covering known confusion cases; separately, ~6K recipes labeled for cuisine using Claude Sonnet 4.6 API (output: `data/All_Recipe_Cuisine_Labeled_v2.csv`, `llm_cuisine` column) — validated on a 50-sample expert-verified holdout set, iterated prompt design on boundary-case errors to reach >90% holdout accuracy before full-scale labeling; used prompt caching on the static system prompt and incremental checkpointing every 100 records to prevent data loss
-7. **LoRA adapter** (Week 5) — fine-tuned `gemma2:2b` adapter (`cuisine-classifier:latest`) trained on ~200 examples to fix name-keyword bias; achieves 90.5% accuracy vs 71% base model
+7. **LoRA adapter** (Week 5) — fine-tuned `gemma2:2b` adapter (`cuisine-classifier:latest`) trained on ~200 examples to fix name-keyword bias and ingredient bias; achieves 93% (Colab) / 85.7% (local) accuracy vs 71% base model
 8. **Ambiguity signal + Cuisine knowledge RAG** (Week 6) — k=3 neighbour retrieval computes ambiguity level; top 2 cuisine knowledge cards (format rules, confused-with, traps) retrieved from ChromaDB
 9. **Classification** — all retrieved context fed to the LLM → cuisine label + reasoning + confidence score
 
@@ -30,32 +30,39 @@ Classification — the LLM picks one label from six fixed cuisine categories bas
 
 **Flow 1 — Context-enhanced base model:**
 - Input: `Vegetable Quesadillas` (found in dataset)
-- Ingredients and description auto-fetched from CSV
+- CLI: ingredients and description auto-fetched from dataset (default behaviour, override with `--no-context`)
+- Streamlit: user enables "Look it up in the recipe dataset" checkbox to fetch ingredients and description
 - Static few-shot examples + prompt rules applied
-- Output: `Mexican`, confidence 95%
+- Output: `Mexican`, confidence 0% (correct but uncertain — small model limitation)
+- Note: adding retrieval + cuisine knowledge RAG keeps the correct answer but reasoning remains confused; LoRA adapter lifts confidence to 95% with grounded reasoning
 
 **Flow 2 — LoRA adapter (hard case):**
 - Input: `Navajo Tacos`
 - Base model incorrectly predicts `Mexican` (name-keyword bias on "Tacos")
 - Adapter correctly predicts `American` (fry bread dish = Native American)
 - Adapter fixes name-keyword bias cases that prompt rules alone cannot resolve
+- Example 2 (ingredient bias): `Korean Barbecue-Style Meatballs` — base model predicts `Indian` at 90% despite reasoning mentioning Korean signals (reasoning contradicts output); adapter correctly predicts `Other` at 95% by recognising Korean is outside the five categories
 
 **Flow 3 — Cuisine knowledge RAG:**
 - Input: `Bourbon Chicken`
 - Ambiguity signal: `mild` — neighbours split between Chinese and American
 - RAG retrieves Chinese cuisine card: trap — "despite 'bourbon', this is American-Chinese restaurant food"
 - Output: `Chinese` — trap overrides the name signal
+- Example 2: `Chicken Teriyaki Tacos` — ambiguity signal: `mild` (neighbours split across Mexican, Chinese); RAG correctly outputs `Other` at 100% confidence; reasoning identifies teriyaki/sesame oil/Japanese cucumbers as Japanese signals and maps to `Other` since Japanese is outside the five categories
 
 **Flow 4 — Image upload path:**
 - Input: dish name `Chicken Teriyaki Tacos` + uploaded recipe card image
 - Vision model extracts ingredients and description from the card
-- Quality checks pass → extracted context fed into RAG pipeline
-- Output: cuisine label + reasoning + confidence
+- Quality checks pass → extracted context fed into retrieval few-shot pipeline
+- Base model: `Mexican`, confidence 0% — name-keyword bias on "Tacos"
+- Adapter + retrieval few-shot (mpnet): `Other`, confidence 95% — correctly identifies Japanese markers (soy sauce, sesame oil, teriyaki) as dominant over the Mexican taco format
+- Retrieval few-shot (mpnet) + cuisine knowledge RAG: `Other`, confidence 100% — ambiguity signal shows "confident, all 3 neighbours agree: Chinese" but Japanese teriyaki markers override the Chinese neighbour signal
 
 **Flow 5 — Fallback (dish not in dataset, no image):**
 - Input: `Butter Chicken`
 - No context available — LLM classifies from dish name only
-- Output: `Indian`, confidence 95%
+- Output: `Indian`, confidence 0% (base model — correct but uncertain)
+- Note: adapter predicts `Indian` at 98% with grounded reasoning (Punjabi origin, garam masala, ghee, tomato-based gravy)
 
 ## Success Criteria
 
@@ -64,7 +71,7 @@ Classification — the LLM picks one label from six fixed cuisine categories bas
 - **Base model accuracy (prompt-only):** 71% (30/42) on eval set
 - **Context-enhanced accuracy:** 73.8% (31/42) on eval set (Macro F1: 73.6%)
 - **Few-shot retrieval accuracy (mpnet):** 78.6% (33/42) on eval set (Macro F1: 79.5%, +4.8pp over context-enhanced)
-- **Adapter accuracy:** 90.5% (38/42) on eval set
+- **Adapter accuracy:** 85.7% (36/42) on eval set (Macro F1: 87.4%)
 - **Cuisine knowledge RAG accuracy:** 90.5% (38/42) on eval set (Macro F1: 91.4%, +16.7pp over context-enhanced)
-- Image upload path produces equivalent accuracy to CSV context enhancement for the same dish
+- Image upload path with `gemma4:e4b` (Colab/Linux) produces accuracy equivalent to CSV context enhancement; locally, `llava:7b` OCR errors can degrade dish name signals (e.g. "Chicken Teriyaki Tacos" extracted as "Chicken Teriyaki Faces") causing the wrong cuisine knowledge card to be retrieved downstream
 - Quality check rejects non-recipe images before they reach the classification pipeline

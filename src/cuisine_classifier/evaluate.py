@@ -7,10 +7,11 @@ Runs ablation study: baseline (dish name only) → context-enhanced → retrieva
 import sys
 import os
 import pandas as pd
+from sklearn.metrics import f1_score
 from cuisine_classifier.__main__ import load_config, load_dataset, predict_cuisine
 
 
-def evaluate_classifier(test_dishes, config, leg_label="", dataset=None, use_retrieval=False, vector_store=None, model_name=None):
+def evaluate_classifier(test_dishes, config, leg_label="", dataset=None, use_retrieval=False, vector_store=None, model_name=None, use_rag=False, rag_vector_store=None):
     """
     Evaluate classifier on test dishes.
 
@@ -37,6 +38,8 @@ def evaluate_classifier(test_dishes, config, leg_label="", dataset=None, use_ret
             use_retrieval=use_retrieval,
             vector_store=vector_store,
             model_name=model_name,
+            use_rag=use_rag,
+            rag_vector_store=rag_vector_store,
         )
         predicted = output["Cuisine"] if output else "ERROR"
         is_correct = predicted.lower() == expected.lower()
@@ -50,22 +53,26 @@ def evaluate_classifier(test_dishes, config, leg_label="", dataset=None, use_ret
         })
 
     accuracy = (correct / total * 100) if total > 0 else 0
-    return accuracy, correct, total, predictions
+    y_true = [p["expected"] for p in predictions]
+    y_pred = [p["predicted"] for p in predictions]
+    macro_f1 = f1_score(y_true, y_pred, average="macro", zero_division=0) * 100
+    return accuracy, correct, total, predictions, macro_f1
 
 
-def print_results(mode, accuracy, correct, total, predictions, verbose=False):
+def print_results(mode, accuracy, correct, total, predictions, macro_f1, verbose=False):
     """Print evaluation results."""
     print(f"\n{'='*65}")
     print(f"{mode.upper()} MODE")
     print(f"{'='*65}")
-    print(f"Accuracy: {accuracy:.1f}% ({correct}/{total})")
+    print(f"Accuracy:   {accuracy:.1f}% ({correct}/{total})")
+    print(f"Macro F1:   {macro_f1:.1f}%")
 
     if verbose:
         print(f"\nDetailed Results:")
         for pred in predictions:
-            status = "✓" if pred["correct"] else "✗"
+            status = "OK" if pred["correct"] else "XX"
             print(
-                f"  {status} {pred['dish'][:40]:40} "
+                f"  [{status}] {pred['dish'][:40]:40} "
                 f"| GT: {pred['expected']:8} "
                 f"| Pred: {pred['predicted']}"
             )
@@ -75,7 +82,7 @@ def print_results(mode, accuracy, correct, total, predictions, verbose=False):
             print(f"\nFailures:")
             for pred in failures:
                 print(
-                    f"  ✗ {pred['dish'][:40]:40} "
+                    f"  [XX] {pred['dish'][:40]:40} "
                     f"| GT: {pred['expected']:8} "
                     f"| Pred: {pred['predicted']}"
                 )
@@ -92,6 +99,7 @@ def main():
     parser.add_argument("--skip-baseline", action="store_true", help="Skip baseline leg and run context-enhanced only")
     parser.add_argument("--retrieval", action="store_true", help="Run retrieval-augmented mode as third ablation leg")
     parser.add_argument("--embed-model", type=str, default=None, help="Embedding model for retrieval (required with --retrieval)")
+    parser.add_argument("--rag", action="store_true", help="Run Week 6 cuisine knowledge RAG as an ablation leg")
     args = parser.parse_args()
 
     try:
@@ -135,15 +143,18 @@ def main():
     base_accuracy = base_correct = base_total = base_predictions = None
     if not args.skip_baseline:
         print("\n[1/3] Baseline — dish name only (no context, no retrieval)")
-        print(f"{'─'*65}")
-        base_accuracy, base_correct, base_total, base_predictions = evaluate_classifier(
+        print(f"{'-'*65}")
+        base_accuracy, base_correct, base_total, base_predictions, base_f1 = evaluate_classifier(
             test_dishes, config, leg_label="No Context", dataset=None, use_retrieval=False, model_name=active_model,
         )
 
     # Leg 2 — context-enhanced: dataset lookup for ingredients + description
-    print(f"\n[2/3] Context-Enhanced — dataset lookup (ingredients + description)")
-    print(f"{'─'*65}")
-    ctx_accuracy, ctx_correct, ctx_total, ctx_predictions = evaluate_classifier(
+    default_model = config["model"]["name"]
+    is_adapter = active_model != default_model
+    ctx_leg_label = f"Context-Enhanced [{active_model}]" if is_adapter else "Context-Enhanced — dataset lookup (ingredients + description)"
+    print(f"\n[2/3] {ctx_leg_label}")
+    print(f"{'-'*65}")
+    ctx_accuracy, ctx_correct, ctx_total, ctx_predictions, ctx_f1 = evaluate_classifier(
         test_dishes, config, leg_label="With Context", dataset=dataset, use_retrieval=False, model_name=active_model,
     )
 
@@ -163,8 +174,8 @@ def main():
                 print(f"  Run: uv run python retrieval/populate.py --model {args.embed_model}", file=sys.stderr)
                 sys.exit(1)
             print(f"\n[3/3] Retrieval-Augmented — context + ChromaDB few-shot ({args.embed_model})")
-            print(f"{'─'*65}")
-            rag_accuracy, rag_correct, rag_total, rag_predictions = evaluate_classifier(
+            print(f"{'-'*65}")
+            rag_accuracy, rag_correct, rag_total, rag_predictions, rag_f1 = evaluate_classifier(
                 test_dishes, config, leg_label="With Retrieval", dataset=dataset,
                 use_retrieval=True, vector_store=vector_store, model_name=active_model,
             )
@@ -172,35 +183,69 @@ def main():
             print(f"Error loading vector store: {e}", file=sys.stderr)
             sys.exit(1)
 
+    # Leg 4 — Week 6 cuisine knowledge RAG (only if --rag passed)
+    knowledge_rag_accuracy = knowledge_rag_correct = knowledge_rag_total = knowledge_rag_predictions = None
+    if args.rag:
+        try:
+            sys.path.insert(0, project_root)
+            from retrieval.vector_store import VectorStore
+            from retrieval.knowledge_store import get_knowledge_collection
+            rag_vs = VectorStore(model="mpnet")
+            if rag_vs.count() == 0:
+                print("Error: mpnet vector store is empty — run: uv run python retrieval/populate.py --model mpnet", file=sys.stderr)
+                sys.exit(1)
+            kc = get_knowledge_collection()
+            if kc.count() < 6:
+                print("Error: knowledge store not populated — run: uv run python retrieval/knowledge_store.py", file=sys.stderr)
+                sys.exit(1)
+            leg_num = "4" if args.retrieval else "3"
+            print(f"\n[{leg_num}/3] Cuisine Knowledge RAG — ambiguity signal + retrieved cuisine cards")
+            print(f"{'-'*65}")
+            knowledge_rag_accuracy, knowledge_rag_correct, knowledge_rag_total, knowledge_rag_predictions, knowledge_rag_f1 = evaluate_classifier(
+                test_dishes, config, leg_label="Knowledge RAG", dataset=dataset,
+                model_name=active_model, use_rag=True, rag_vector_store=rag_vs,
+            )
+        except Exception as e:
+            print(f"Error initialising RAG components: {e}", file=sys.stderr)
+            sys.exit(1)
+
     # Print results
     if base_predictions is not None:
-        print_results("Baseline (dish name only)", base_accuracy, base_correct, base_total, base_predictions, args.verbose)
-    print_results("Context-Enhanced (dataset lookup)", ctx_accuracy, ctx_correct, ctx_total, ctx_predictions, args.verbose)
+        print_results("Baseline (dish name only)", base_accuracy, base_correct, base_total, base_predictions, base_f1, args.verbose)
+    print_results(ctx_leg_label, ctx_accuracy, ctx_correct, ctx_total, ctx_predictions, ctx_f1, args.verbose)
 
     if rag_predictions is not None:
-        print_results(f"Retrieval-Augmented ({args.embed_model})", rag_accuracy, rag_correct, rag_total, rag_predictions, args.verbose)
+        print_results(f"Retrieval-Augmented ({args.embed_model})", rag_accuracy, rag_correct, rag_total, rag_predictions, rag_f1, args.verbose)
+
+    if knowledge_rag_predictions is not None:
+        print_results("Cuisine Knowledge RAG (Week 6)", knowledge_rag_accuracy, knowledge_rag_correct, knowledge_rag_total, knowledge_rag_predictions, knowledge_rag_f1, args.verbose)
 
     # Comparison
     print(f"\n{'='*65}")
     print(f"COMPARISON")
     print(f"{'='*65}")
     if base_predictions is not None:
-        print(f"Baseline (dish name only):        {base_accuracy:.1f}%")
-    print(f"Context-Enhanced (dataset lookup): {ctx_accuracy:.1f}%")
+        print(f"Baseline (dish name only):        {base_accuracy:.1f}%  (Macro F1: {base_f1:.1f}%)")
+    print(f"{ctx_leg_label}: {ctx_accuracy:.1f}%  (Macro F1: {ctx_f1:.1f}%)")
     if base_predictions is not None:
         ctx_improvement = ctx_accuracy - base_accuracy
         print(f"Context improvement:              {ctx_improvement:+.1f} percentage points")
         if ctx_improvement > 0:
-            print(f"\n✓ Dataset context improved accuracy!")
+            print(f"\n[OK] Dataset context improved accuracy!")
         elif ctx_improvement < 0:
-            print(f"\n✗ Dataset context decreased accuracy")
+            print(f"\n[XX] Dataset context decreased accuracy")
         else:
-            print(f"\n− No change from adding context")
+            print(f"\n[--] No change from adding context")
 
     if rag_predictions is not None:
         rag_improvement = rag_accuracy - ctx_accuracy
-        print(f"Retrieval-Augmented:              {rag_accuracy:.1f}%")
+        print(f"Retrieval-Augmented:              {rag_accuracy:.1f}%  (Macro F1: {rag_f1:.1f}%)")
         print(f"Retrieval improvement over ctx:   {rag_improvement:+.1f} percentage points")
+
+    if knowledge_rag_predictions is not None:
+        kr_improvement = knowledge_rag_accuracy - ctx_accuracy
+        print(f"Cuisine Knowledge RAG:            {knowledge_rag_accuracy:.1f}%  (Macro F1: {knowledge_rag_f1:.1f}%)")
+        print(f"RAG improvement over ctx:         {kr_improvement:+.1f} percentage points")
 
     # Per-category breakdown
     print(f"\nPer-category breakdown (context-enhanced):")
