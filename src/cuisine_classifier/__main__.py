@@ -118,6 +118,82 @@ Dish name: {dish_name}
 _AMERICAN_ALIASES = {'Cajun', 'Creole', 'Hawaiian', 'Tex-Mex', 'Southern'}
 _VALID_LABELS = {'American', 'Italian', 'Indian', 'Mexican', 'Chinese', 'Other'}
 
+_RAG_SYSTEM_PROMPT = (
+    "You are an expert cuisine classifier working on a recipe dataset from AllRecipes.com.\n"
+    "Assign each recipe to EXACTLY ONE of these six cuisine categories:\n\n"
+    "  American | Italian | Indian | Mexican | Chinese | Other\n\n"
+    "AMERICAN: Dishes rooted in United States culinary traditions including all US regional styles. "
+    "Default for everyday desserts, baked goods, drinks, snacks, and generic US home cooking with no foreign signal.\n\n"
+    "ITALIAN: Dishes with Italian culinary origins: pasta, pizza, risotto, Italian sauces/cheeses/meats.\n\n"
+    "INDIAN: Dishes from the Indian subcontinent with masala/ghee/garam-masala base.\n\n"
+    "MEXICAN: Dishes from Mexican culinary tradition, including Tex-Mex.\n\n"
+    "CHINESE: Dishes from Chinese culinary tradition, including American-Chinese restaurant food.\n\n"
+    "OTHER: Any cuisine outside the five above (French, Japanese, Korean, Thai, etc.) "
+    "or fusion with no clear dominant cuisine.\n\n"
+    "REASONING ORDER:\n"
+    "1. Check the retrieved format rules — if they name this dish's exact format word, follow them.\n"
+    "2. Check the trap — if it names this dish specifically, follow it.\n"
+    "3. Check marker ingredients — confirm or override the hypothesis. "
+    "Generic ingredients (flour, butter, eggs, oil) carry no cuisine signal.\n"
+    "4. Default to American for generic US dishes with no foreign signal.\n"
+    "Never use any label outside: American, Italian, Indian, Mexican, Chinese, Other.\n\n"
+    "Populate the Reasoning field with 2-3 short sentences explaining which signals (format word, trap, ingredients) led to your conclusion."
+)
+
+
+def ambiguity_signal(ingredients: str, description: str, vector_store) -> dict:
+    """Layer 1: k=3 neighbour retrieval to detect classification ambiguity."""
+    query = " ".join(filter(None, [ingredients, description]))
+    if not query:
+        return {"level": "unknown", "candidates": [], "note": "no context available"}
+
+    neighbours = vector_store.query(query, k=3)
+    labels = [n["cuisine_type"] for n in neighbours if n.get("cuisine_type")]
+    if not labels:
+        return {"level": "unknown", "candidates": [], "note": "no labelled neighbours"}
+
+    unique = list(dict.fromkeys(labels))  # preserve order, deduplicate
+
+    if len(unique) == 1:
+        return {"level": "confident", "candidates": unique,
+                "note": f"all 3 neighbours agree: {unique[0]}"}
+    elif len(unique) == 2:
+        return {"level": "mild", "candidates": unique,
+                "note": f"neighbours split across {unique}"}
+    else:
+        return {"level": "high", "candidates": unique,
+                "note": f"neighbours disagree: {', '.join(unique)}"}
+
+
+def build_rag_prompt(dish_name, ingredients, description, ambiguity, retrieved_cards):
+    ingredients_str = ingredients or ""
+    description_str = description or ""
+
+    amb_level = ambiguity.get("level", "unknown")
+    amb_note = ambiguity.get("note", "")
+
+    card_lines = []
+    for card in (retrieved_cards or []):
+        card_lines.append(f"- {card['cuisine']}: {card.get('format_rules', '')} "
+                          f"(confused with: {card.get('confused_with', '')}.) "
+                          f"({card.get('trap', '')})")
+
+    cards_str = "\n".join(card_lines)
+
+    return (
+        f"Dish: {dish_name}\n"
+        f"Ingredients: {ingredients_str}\n"
+        f"Description: {description_str}\n\n"
+        f"Retrieved context:\n"
+        f"Ambiguity: {amb_level} — {amb_note}\n"
+        f"Format rules describe a strong default, not a guaranteed answer. Before finalizing, "
+        f"check whether Trap or Confused-with for this same card describes an exception that "
+        f"applies to THIS dish's specific modifier\n"
+        f"If a retrieved trap names this exact dish, follow it over all other signals.\n"
+        f"Relevant cuisine notes (follow the trap that names this dish):\n"
+        f"{cards_str}"
+    )
+
 
 def _parse_free_form(text: str, dish_name: str, cuisine_types: list) -> dict:
     """Parse free-form JSON output from the adapter (mirrors Colab extract_cuisine_label)."""
@@ -163,7 +239,9 @@ def _parse_free_form(text: str, dish_name: str, cuisine_types: list) -> dict:
     }
 
 
-def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector_store=None, model_name=None):
+def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector_store=None,
+                    model_name=None, use_rag=False, rag_vector_store=None,
+                    image_ingredients=None, image_description=None):
     cuisine_types = config["cuisine_types"]
     system_prompt = (
         "You are an expert cuisine classifier working on a recipe dataset from AllRecipes.com.\n"
@@ -298,13 +376,19 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         "Never use any label outside: American, Italian, Indian, Mexican, Chinese, Other."
     )
 
-    print(f"[1/4] Dataset lookup: fetching context for '{dish_name}'...")
-    ingredients, description = lookup_context(dish_name, dataset)
-    context_found = bool(ingredients or description)
-    if context_found:
-        print(f"[1/4] Dataset lookup: context retrieved successfully.")
+    if image_ingredients is not None or image_description is not None:
+        print(f"[1/4] Image extraction: using ingredients and description from uploaded recipe card.")
+        ingredients = image_ingredients
+        description = image_description
+        context_found = True
     else:
-        print(f"[1/4] Dataset lookup: no context found — proceeding with dish name only.")
+        print(f"[1/4] Dataset lookup: fetching context for '{dish_name}'...")
+        ingredients, description = lookup_context(dish_name, dataset)
+        context_found = bool(ingredients or description)
+        if context_found:
+            print(f"[1/4] Dataset lookup: context retrieved successfully.")
+        else:
+            print(f"[1/4] Dataset lookup: no context found — proceeding with dish name only.")
 
     few_shot_examples = None
     if use_retrieval and vector_store is not None:
@@ -312,23 +396,45 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
         if not query_text:
             query_text = dish_name
         candidates = vector_store.query(query_text, k=4)
-        _RETRIEVAL_DISTANCE_THRESHOLD = 0.18
+        # _RETRIEVAL_DISTANCE_THRESHOLD = 0.18
         few_shot_examples = [
             ex for ex in candidates
-            if ex["dish_name"] != dish_name and ex.get("distance", 1.0) <= _RETRIEVAL_DISTANCE_THRESHOLD
+            if ex["dish_name"] != dish_name  # and ex.get("distance", 1.0) <= _RETRIEVAL_DISTANCE_THRESHOLD
         ][:3]
         if few_shot_examples:
             print(f"[2/4] ChromaDB retrieval: {len(few_shot_examples)} few-shot examples retrieved ({vector_store.model}).")
         else:
-            print(f"[2/4] ChromaDB retrieval: no close matches (threshold {_RETRIEVAL_DISTANCE_THRESHOLD}) — falling back to static few-shot only.")
+            print(f"[2/4] ChromaDB retrieval: no close matches — falling back to static few-shot only.")
     else:
         print(f"[2/4] ChromaDB retrieval: skipped — zero-shot mode.")
-
-    prompt = build_prompt(dish_name, ingredients, description, few_shot_examples)
 
     active_model = model_name or config["model"]["name"]
     adapter_model = config.get("adapter", {}).get("name", "cuisine-classifier:latest")
     use_adapter_format = (active_model == adapter_model)
+
+    # Week 6 RAG — only for base model (adapter has its own trained format)
+    rag_ambiguity = None
+    rag_cards = None
+    if use_rag and not use_adapter_format:
+        try:
+            from retrieval.knowledge_store import retrieve_cuisine_cards as _retrieve_cards
+        except ImportError:
+            _project_root = Path(__file__).parent.parent.parent
+            sys.path.insert(0, str(_project_root))
+            from retrieval.knowledge_store import retrieve_cuisine_cards as _retrieve_cards
+
+        if rag_vector_store is not None:
+            rag_ambiguity = ambiguity_signal(ingredients or "", description or "", rag_vector_store)
+        else:
+            rag_ambiguity = {"level": "unknown", "candidates": [], "note": "no vector store provided"}
+
+        rag_cards = _retrieve_cards(dish_name, ingredients or "")
+        prompt = build_rag_prompt(dish_name, ingredients, description, rag_ambiguity, rag_cards)
+        active_system_prompt = _RAG_SYSTEM_PROMPT
+        print(f"[2/4] RAG: ambiguity={rag_ambiguity['level']}, retrieved={[c['cuisine'] for c in rag_cards]}")
+    else:
+        prompt = build_prompt(dish_name, ingredients, description, few_shot_examples)
+        active_system_prompt = system_prompt
 
     print(f"[3/4] Sending prompt to {active_model}...")
     try:
@@ -357,7 +463,7 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
             result = ollama.chat(
                 model=active_model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": active_system_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 format=CuisineResponse.model_json_schema(),
@@ -369,12 +475,17 @@ def predict_cuisine(dish_name, config, dataset=None, use_retrieval=False, vector
                 print(f"Note: model returned '{output['Cuisine']}' — remapped to 'Other'.", file=sys.stderr)
                 output["Cuisine"] = "Other"
 
+        if rag_ambiguity is not None:
+            output["ambiguity"] = rag_ambiguity
+        if rag_cards is not None:
+            output["retrieved_cards"] = rag_cards
+
         print(f"[4/4] Response received — classification complete.")
-        return output, prompt, system_prompt, context_found, few_shot_examples
+        return output, prompt, active_system_prompt, context_found, few_shot_examples
 
     except Exception as e:
         print(f"Error calling Ollama: {e}", file=sys.stderr)
-        return None, prompt, system_prompt, context_found, few_shot_examples
+        return None, prompt, active_system_prompt, context_found, few_shot_examples
 
 
 def main():
@@ -385,6 +496,10 @@ def main():
     parser.add_argument("--config", type=str, default=None, help="Path to config file")
     parser.add_argument("--no-context", action="store_true", help="Disable dataset lookup (dish name only)")
     parser.add_argument("--dataset", type=str, default=None, help="Path to recipe dataset CSV (overrides config)")
+    parser.add_argument("--rag", action="store_true", help="Use Week 6 cuisine knowledge RAG")
+    parser.add_argument("--retrieval", action="store_true", help="Use ChromaDB few-shot retrieval (Week 3)")
+    parser.add_argument("--embed-model", type=str, default="mpnet", choices=["nomic-embed-text", "mpnet"], help="Embedding model for retrieval (default: mpnet)")
+    parser.add_argument("--image", type=str, default=None, help="Path to recipe card image for vision extraction")
 
     args = parser.parse_args()
 
@@ -394,27 +509,81 @@ def main():
         print(f"Error: Config file not found.", file=sys.stderr)
         sys.exit(1)
 
+    import os
+    package_dir = os.path.dirname(__file__)
+    project_root = os.path.dirname(os.path.dirname(package_dir))
+
     dataset = None
     if not args.no_context:
-        import os
         if args.dataset:
             dataset_path = args.dataset
         else:
-            package_dir = os.path.dirname(__file__)
-            project_root = os.path.dirname(os.path.dirname(package_dir))
             dataset_path = os.path.join(project_root, config["dataset"]["path"])
 
         dataset = load_dataset(dataset_path)
         if dataset is not None:
             print(f"Loaded dataset with {len(dataset)} recipes")
 
+    vector_store = None
+    if args.retrieval:
+        sys.path.insert(0, project_root)
+        from retrieval.vector_store import VectorStore
+        vector_store = VectorStore(model=args.embed_model)
+        if vector_store.count() == 0:
+            print(f"Error: vector store for '{args.embed_model}' is empty.", file=sys.stderr)
+            print(f"  Run: uv run python retrieval/populate.py --model {args.embed_model}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Loaded vector store: {args.embed_model} ({vector_store.count()} recipes)")
+
+    rag_vector_store = None
+    if args.rag:
+        sys.path.insert(0, project_root)
+        from retrieval.vector_store import VectorStore
+        from retrieval.knowledge_store import get_knowledge_collection, populate_knowledge_store
+        rag_vector_store = VectorStore(model="mpnet")
+        populate_knowledge_store()
+
+    image_ingredients = None
+    image_description = None
+    if args.image:
+        from cuisine_classifier.vision import extract_from_image, check_extraction
+        print(f"Extracting from image: {args.image}")
+        extracted = extract_from_image(args.image)
+        quality = check_extraction(extracted, args.dish_name)
+        if quality["passed"]:
+            print("Extraction quality check: PASS")
+            if quality["dish_name_mismatch"]:
+                print(
+                    f"Warning: image dish name '{quality['extracted_dish_name']}' "
+                    f"differs from typed '{args.dish_name}'"
+                )
+            image_ingredients = ", ".join(extracted["ingredients"])
+            image_description = extracted["description"]
+        else:
+            print(f"Extraction quality check: FAIL — {'; '.join(quality['issues'])}")
+            print("Falling back to CSV context enhancement.")
+
     print(f"Classifying: {args.dish_name}")
     print(f"Using model: {config['model']['name']}")
-    mode = "baseline" if args.no_context or dataset is None else "context-enhanced"
+    if args.image and image_ingredients is not None:
+        mode = "image-extraction"
+    elif args.rag:
+        mode = "cuisine-knowledge-rag"
+    elif args.retrieval:
+        mode = f"context-enhanced + few-shot retrieval ({args.embed_model})"
+    elif args.no_context or dataset is None:
+        mode = "baseline"
+    else:
+        mode = "context-enhanced"
     print(f"Mode: {mode}")
     print()
 
-    output, _, __, ___, ____ = predict_cuisine(args.dish_name, config, dataset=dataset)
+    output, _, __, ___, ____ = predict_cuisine(
+        args.dish_name, config, dataset=dataset,
+        use_retrieval=args.retrieval, vector_store=vector_store,
+        use_rag=args.rag, rag_vector_store=rag_vector_store,
+        image_ingredients=image_ingredients, image_description=image_description,
+    )
 
     if output:
         print(json.dumps(output, indent=2))
