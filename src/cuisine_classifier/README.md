@@ -335,29 +335,40 @@ uv run python -m cuisine_classifier.evaluate --verbose --retrieval --embed-model
 ```
 src/cuisine_classifier/
 ├── __init__.py         # Package declaration
-├── __main__.py         # Classifier logic and CLI entry point
-├── evaluate.py         # Evaluation script — ablation study on golden eval set
-├── embedder.py         # Fine-tuning script for all-mpnet-base-v2 on domain pairs
-├── domain_pairs.py     # 120 labeled close/far pairs for embedding fine-tuning
-├── config.yaml         # Model settings and cuisine types
-├── vision.py           # Week 7: image extraction pipeline (llava:7b + gemma2:2b corrector + quality checks)
+├── __main__.py         # Classifier logic and CLI entry point; predict_cuisine() wires all
+│                       #   pipeline layers: context lookup, retrieval, RAG, vision, adapter
+├── evaluate.py         # Ablation study: baseline → context-enhanced → retrieval → RAG legs;
+│                       #   reports accuracy and macro F1 per leg
+├── embedder.py         # Fine-tunes all-mpnet-base-v2 on 120 domain pairs (CoSENTLoss, 5 epochs);
+│                       #   saves to models/ft-domain-embedding/cuisine_mpnet_ft
+├── domain_pairs.py     # 120 labeled close/far pairs (20 per cuisine) for embedding fine-tuning
+├── config.yaml         # Model name, temperature, dataset path, cuisine types
+├── vision.py           # Week 7: llava:7b extracts dish_name/ingredients/description from image;
+│                       #   gemma2:2b corrects malformed JSON; structural + semantic quality checks
 └── README.md
 
 retrieval/
-├── vector_store.py     # ChromaDB wrapper (add + query) — recipe collection
-├── populate.py         # Script to embed all recipes into ChromaDB (skips existing)
-├── knowledge_store.py  # Week 6: embed + query cuisine knowledge cards
-├── chroma_db/          # Persistent vector store for nomic-embed-text
-└── chroma_db_mpnet/    # Persistent vector store for mpnet (recipes + knowledge cards, separate collections)
+├── vector_store.py     # ChromaDB wrapper for the recipe few-shot collection; supports
+│                       #   nomic-embed-text (Ollama) and mpnet (local fine-tuned) backends;
+│                       #   used to retrieve 3 similar labeled recipes as dynamic few-shot examples
+├── populate.py         # Embeds recipes from dataset into ChromaDB for few-shot retrieval;
+│                       #   runs in batches of 200, skips already-stored recipes;
+│                       #   supports --model nomic-embed-text (default) and --model mpnet
+├── knowledge_store.py  # Week 6: embeds cuisine knowledge cards (format rules, confused-with,
+│                       #   traps — one card per cuisine) into a separate ChromaDB collection
+│                       #   (cuisine_knowledge_mpnet); retrieves top 2 cards per query for RAG
+├── chroma_db/          # Persistent vector store — nomic-embed-text recipe embeddings (few-shot)
+└── chroma_db_mpnet/    # Persistent vector store — mpnet embeddings; two separate collections:
+│                       #   recipe few-shot collection + cuisine knowledge card collection
 
 models/
 ├── ft-domain-embedding/
 │   └── cuisine_mpnet_ft/   # Fine-tuned all-mpnet-base-v2 (output of embedder.py)
 └── (GGUF adapter placed here or at project root)
 
-Modelfile               # Ollama Modelfile pointing to the GGUF adapter
-cuisine_adapter_q4.gguf # Downloaded GGUF adapter (q8_0, named q4 historically)
-app.py                  # Streamlit UI (project root)
+Modelfile               # Ollama Modelfile pointing to the GGUF adapter (cuisine-classifier:latest)
+cuisine_adapter_q4.gguf # LoRA adapter weights — q8_0 quantization (named q4 historically)
+app.py                  # Streamlit UI — dish name input, image upload, model/retrieval/RAG controls
 ```
 
 ## Configuration
