@@ -19,6 +19,7 @@ chroma_store
 
 # Student-generated outputs
 # specs/
+models/
 demo_checklist.md
 demo_script.md
 # problem_statement.md
