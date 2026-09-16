@@ -1,7 +1,0 @@
-{
-  "model": "claude-sonnet-4-6",
-  "effortLevel": "medium",
-  "permissions": {
-    "allow": ["Skill", "Bash"]
-  }
-}
