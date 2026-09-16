@@ -3,12 +3,12 @@
 
 .venv
 __pycache__
-
+.claude
 tmp.txt
 
 # ChromaDB
 chroma_store
-retrieval/chroma_db/
+# retrieval/chroma_db/
 
 # Secrets
 .env
