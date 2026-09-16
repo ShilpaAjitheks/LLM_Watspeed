@@ -1,5 +1,6 @@
 .sessions/
 .pytest_cache
+.python
 
 .venv
 __pycache__
@@ -27,11 +28,12 @@ demo_script.md
 # problem_statement.md
 course_feedback_tracker.md
 reflection.md
-Modelfile
 
 # Fine-tuning artifacts
 finetuning/adapter/
 finetuning/finetune_data.jsonl
+cuisine_adapter_q4.gguf
+Modelfile
 
 # Claude Code local state
 .claude/hooks/state/
