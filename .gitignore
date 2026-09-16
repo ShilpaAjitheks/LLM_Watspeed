@@ -5,6 +5,7 @@
 __pycache__
 .claude
 tmp.txt
+.vscode
 
 # ChromaDB
 chroma_store
@@ -18,12 +19,15 @@ chroma_store
 **/.DS_Store
 
 # Student-generated outputs
+
 # specs/
 models/
 demo_checklist.md
 demo_script.md
 # problem_statement.md
 course_feedback_tracker.md
+reflection.md
+Modelfile
 
 # Fine-tuning artifacts
 finetuning/adapter/
