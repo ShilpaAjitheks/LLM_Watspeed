@@ -16,7 +16,7 @@ Full documentation: [src/cuisine_classifier/README.md](src/cuisine_classifier/RE
 
 ## Architecture
 
-![Architecture diagram](assets/architecture.png)
+![Architecture diagram](assets/architecture1.png)
 
 ## Quick Start
 
