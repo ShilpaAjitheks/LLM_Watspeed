@@ -14,6 +14,10 @@ A RAG + LoRA fine-tuned multimodal pipeline: retrieval-augmented few-shot prompt
 
 Full documentation: [src/cuisine_classifier/README.md](src/cuisine_classifier/README.md)
 
+## Architecture
+
+![Architecture diagram](assets/architecture.png)
+
 ## Quick Start
 
 ```bash
