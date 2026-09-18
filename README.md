@@ -2,6 +2,16 @@
 
 **Cuisine Classifier** — given a dish name (or recipe card image), classifies it into one of six cuisine types: Italian, Chinese, Mexican, Indian, American, or Other.
 
+A RAG + LoRA fine-tuned multimodal pipeline: retrieval-augmented few-shot prompting, a LoRA-adapted gemma2:2b classifier, and vision-based recipe extraction from images — reaching 90.5% accuracy (up from a 71% base-model baseline).
+
+## Demo
+
+**Text input + model comparison** — base model vs. LoRA adapter, side by side
+![Text input demo](assets/flow1_full.gif)
+
+**Image upload + cuisine-knowledge RAG** — recipe card → vision extraction → retrieval-augmented classification with full reasoning
+![Image upload demo](assets/flow2_full.gif)
+
 Full documentation: [src/cuisine_classifier/README.md](src/cuisine_classifier/README.md)
 
 ## Quick Start
